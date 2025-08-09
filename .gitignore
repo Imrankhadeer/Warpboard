@@ -1,6 +1,4 @@
-/sounds
-/config
+sounds/
+config/
 *.log
-/node_modules
-
-
+node_modules/
