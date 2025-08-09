@@ -1,0 +1,15 @@
+{
+    "theme": "darkly",
+    "single_sound_mode": false,
+    "auto_start_include_mic_in_mix": false,
+    "master_volume": 51.716738197424895,
+    "soundboard_monitor_volume": 100.0,
+    "mic_monitor_volume": 100.0,
+    "output_device_id": 8,
+    "input_device_id": 1,
+    "soundboard_monitor_device_id": 4,
+    "mic_monitor_device_id": 4,
+    "include_mic_in_mix": true,
+    "soundboard_monitor_enabled": false,
+    "mic_monitor_enabled": true
+}

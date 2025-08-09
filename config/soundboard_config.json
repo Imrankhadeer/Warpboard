@@ -1,0 +1,21 @@
+{
+    "sounds": [
+        {
+            "id": "ecec6ce5-ec55-4683-bdf6-e1cac645ad5c",
+            "name": "rahi mera baccha(No music)",
+            "path": "D:\\Programing\\Python\\WarpBoard\\temp_audio\\sounds\\rahi mera baccha(No music).wav",
+            "volume": 1.0,
+            "hotkeys": [
+                "s"
+            ],
+            "loop": false,
+            "duration": 21.060498866213152
+        }
+    ],
+    "global_hotkeys": {
+        "stop_all": [
+            "d"
+        ],
+        "toggle_mic_to_mixer": []
+    }
+}
