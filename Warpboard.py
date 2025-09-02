@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, Toplevel
+from tkinter import filedialog, messagebox, simpledialog, Toplevel, font
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 import json
@@ -9,23 +9,19 @@ import soundfile as sf
 import numpy as np
 import pyaudio
 import time
-import shutil
-import subprocess
-import platform
-import logging
-import traceback
-from collections import deque
-from threading import Lock, Event
-import pydub
-import importlib.metadata
 import re
 import sys
 import uuid
-import resampy
-import sounddevice as sd
+import pydub
+import importlib.metadata
+from collections import deque
+from threading import Lock, Event
 from pynput import keyboard, mouse
-import pygame
 import enum
+import logging
+import webbrowser
+import platform
+import subprocess
 
 # --- Configuration and Constants ---
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +32,11 @@ APP_SETTINGS_FILE = os.path.join(CONFIG_DIR, "app_settings.json")
 LOG_FILE = os.path.join(ROOT_DIR, "warpboard.log")
 
 VB_CABLE_URL = "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack43.zip"
+PROFILE_URL = "https://github.com/Imrankhadeer" # Placeholder URL
+APP_VERSION = "2.3.7" # UI Centering & Stability Fix
+
+DOCS_URL = "https://your-docs-link"
+ISSUES_URL = "https://github.com/Imrankhadeer/Warpboard/issues"
 
 # --- Audio Settings ---
 SUPPORTED_FORMATS = [("Audio Files", "*.wav *.mp3 *.ogg *.flac")]
@@ -46,2229 +47,1242 @@ FRAME_SIZE = 1024
 
 # --- UI and Validation ---
 INVALID_FILENAME_CHARS = r'[<>:"/\\|?*]'
-MAX_DISPLAY_NAME_LENGTH = 25
-MAX_DEVICE_NAME_LENGTH = 35
+MAX_DISPLAY_NAME_LENGTH = 30
+MAX_DEVICE_NAME_LENGTH = 45
 
 # --- Setup Logging ---
 logging.basicConfig(
     filename=LOG_FILE,
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(module)s - %(message)s'
 )
 
+# --- Global State ---
 current_playing_sound_details = {}
 current_playing_sound_details_lock = threading.Lock()
 
-# --- Hotkey Enums and Classes ---
+
+# --- Hotkey System ---
 class KeyModifier(enum.Flag):
     NONE = 0
-    SHIFT = enum.auto()
-    CTRL = enum.auto()
-    ALT = enum.auto()
-    SUPER = enum.auto()
+    SHIFT = 1
+    CTRL = 2
+    ALT = 4
+    SUPER = 8
 
 class KeyCode(enum.Enum):
-    A = 'a'
-    B = 'b'
-    C = 'c'
-    D = 'd'
-    E = 'e'
-    F = 'f'
-    G = 'g'
-    H = 'h'
-    I = 'i'
-    J = 'j'
-    K = 'k'
-    L = 'l'
-    M = 'm'
-    N = 'n'
-    O = 'o'
-    P = 'p'
-    Q = 'q'
-    R = 'r'
-    S = 's'
-    T = 't'
-    U = 'u'
-    V = 'v'
-    W = 'w'
-    X = 'x'
-    Y = 'y'
-    Z = 'z'
-    
-    NUM_0 = '0'
-    NUM_1 = '1'
-    NUM_2 = '2'
-    NUM_3 = '3'
-    NUM_4 = '4'
-    NUM_5 = '5'
-    NUM_6 = '6'
-    NUM_7 = '7'
-    NUM_8 = '8'
-    NUM_9 = '9'
-
-    F1 = 'f1'
-    F2 = 'f2'
-    F3 = 'f3'
-    F4 = 'f4'
-    F5 = 'f5'
-    F6 = 'f6'
-    F7 = 'f7'
-    F8 = 'f8'
-    F9 = 'f9'
-    F10 = 'f10'
-    F11 = 'f11'
-    F12 = 'f12'
-
-    SPACE = 'space'
-    ENTER = 'enter'
-    ESC = 'esc'
-    TAB = 'tab'
-    BACKSPACE = 'backspace'
-    DELETE = 'delete'
-    INSERT = 'insert'
-    HOME = 'home'
-    END = 'end'
-    PAGE_UP = 'page_up'
-    PAGE_DOWN = 'page_down'
-    ARROW_UP = 'up'
-    ARROW_DOWN = 'down'
-    ARROW_LEFT = 'left'
-    ARROW_RIGHT = 'right'
-    
-    MOUSE_MIDDLE = 'mouse_middle'
-    MOUSE_X1 = 'mouse_x1'
-    MOUSE_X2 = 'mouse_x2'
     UNKNOWN = 'unknown'
 
 class Hotkey:
     def __init__(self, key_code: KeyCode, modifiers: KeyModifier = KeyModifier.NONE, raw_key: str = None):
-        if not isinstance(key_code, KeyCode):
-            raise TypeError("key_code must be an instance of KeyCode enum.")
-        if not isinstance(modifiers, KeyModifier):
-            raise TypeError("modifiers must be an instance of KeyModifier enum.")
-
-        self.key_code = key_code
-        self.modifiers = modifiers
-        self.raw_key = raw_key if key_code == KeyCode.UNKNOWN else None
+        self.key_code, self.modifiers, self.raw_key = key_code, modifiers, raw_key
 
     def __hash__(self):
         return hash((self.key_code, self.modifiers, self.raw_key))
 
     def __eq__(self, other):
-        if not isinstance(other, Hotkey):
-            return NotImplemented
-        return (self.key_code == other.key_code and 
-                self.modifiers == other.modifiers and 
-                self.raw_key == other.raw_key)
+        return isinstance(other, Hotkey) and (self.key_code, self.modifiers, self.raw_key) == (other.key_code, other.modifiers, other.raw_key)
 
     def __repr__(self):
-        modifier_parts = []
-        if KeyModifier.CTRL in self.modifiers:
-            modifier_parts.append('Ctrl')
-        if KeyModifier.SHIFT in self.modifiers:
-            modifier_parts.append('Shift')
-        if KeyModifier.ALT in self.modifiers:
-            modifier_parts.append('Alt')
-        if KeyModifier.SUPER in self.modifiers:
-            modifier_parts.append('Super')
-
-        key_name = self.raw_key if self.key_code == KeyCode.UNKNOWN else self.key_code.value
-        key_name = key_name.replace('_', ' ').title()
-        if key_name.startswith('mouse_'):
-            key_name = key_name.replace('Mouse ', 'Mouse-')
-        elif key_name.startswith('<vk-') and key_name.endswith('>'):
-            key_name = f"VK-{key_name[4:-1]}"
-
-        if modifier_parts:
-            return f"{'+'.join(modifier_parts)}+{key_name}"
-        return key_name
+        parts = []
+        if KeyModifier.CTRL in self.modifiers: parts.append('Ctrl')
+        if KeyModifier.SHIFT in self.modifiers: parts.append('Shift')
+        if KeyModifier.ALT in self.modifiers: parts.append('Alt')
+        if KeyModifier.SUPER in self.modifiers: parts.append('Super')
+        key_name = self.raw_key.replace('_', ' ').title() if self.raw_key else self.key_code.value
+        if key_name.startswith('<vk-'): key_name = f"VK-{key_name[4:-1]}"
+        parts.append(key_name)
+        return '+'.join(parts)
 
     def to_json_serializable(self):
         parts = []
-        if KeyModifier.CTRL in self.modifiers:
-            parts.append('ctrl')
-        if KeyModifier.SHIFT in self.modifiers:
-            parts.append('shift')
-        if KeyModifier.ALT in self.modifiers:
-            parts.append('alt')
-        if KeyModifier.SUPER in self.modifiers:
-            parts.append('cmd')
-        
-        key_value = self.raw_key if self.key_code == KeyCode.UNKNOWN else self.key_code.value
-        if key_value.startswith('mouse_button_') or key_value.startswith('mouse_') or key_value.startswith('<vk-'):
-            parts.append(key_value)
-        elif len(key_value) == 1 and key_value.isalpha():
-            parts.append(key_value.lower())
-        else:
-            parts.append(key_value)
-        
+        if KeyModifier.CTRL in self.modifiers: parts.append('ctrl')
+        if KeyModifier.SHIFT in self.modifiers: parts.append('shift')
+        if KeyModifier.ALT in self.modifiers: parts.append('alt')
+        if KeyModifier.SUPER in self.modifiers: parts.append('cmd')
+        parts.append(self.raw_key if self.raw_key else self.key_code.value)
         return sorted(parts)
 
     @classmethod
-    def from_json_serializable(cls, hotkey_list_strings: list[str]):
-        modifiers = KeyModifier.NONE
-        key_code = None
-        raw_key = None
-        
-        for s in hotkey_list_strings:
-            if s == 'ctrl':
-                modifiers |= KeyModifier.CTRL
-            elif s == 'shift':
-                modifiers |= KeyModifier.SHIFT
-            elif s == 'alt':
-                modifiers |= KeyModifier.ALT
-            elif s == 'cmd':
-                modifiers |= KeyModifier.SUPER
-            else:
-                try:
-                    key_code = KeyCode(s)
-                    raw_key = None
+    def from_json_serializable(cls, hotkey_list: list[str]):
+        modifiers, key_str = KeyModifier.NONE, None
+        for s in hotkey_list:
+            if s == 'ctrl': modifiers |= KeyModifier.CTRL
+            elif s == 'shift': modifiers |= KeyModifier.SHIFT
+            elif s == 'alt': modifiers |= KeyModifier.ALT
+            elif s == 'cmd': modifiers |= KeyModifier.SUPER
+            else: key_str = s
+        if not key_str: raise ValueError("Hotkey must contain a non-modifier key.")
+        return cls(KeyCode.UNKNOWN, modifiers, raw_key=key_str)
 
-                except ValueError:
-                    if (s.startswith('<vk-') and s.endswith('>')) or s.startswith('mouse_button_') or s in ['mouse_middle', 'mouse_x1', 'mouse_x2']:
-                        key_code = KeyCode.UNKNOWN
-                        raw_key = s
-                    elif s and all(c in map(chr, range(32, 127)) for c in s):  # printable chars
-                        key_code = KeyCode.UNKNOWN
-                        raw_key = s
-                    else:
-                        raise ValueError(f"Unknown key string encountered: {s}")
-
-        
-        if key_code is None:
-            raise ValueError("Hotkey must contain at least one non-modifier key/button.")
-        
-        return cls(key_code=key_code, modifiers=modifiers, raw_key=raw_key)
 
 # --- Utility Functions ---
-def get_hotkey_display_string(hotkey_list_strings):
-    if not hotkey_list_strings:
-        return "Not Assigned"
+def get_hotkey_display_string(hotkey_list):
+    if not hotkey_list: return "Not Assigned"
     try:
-        hotkey_obj = Hotkey.from_json_serializable(hotkey_list_strings)
-        return str(hotkey_obj)
-    except ValueError as e:
-        logging.warning(f"Failed to convert hotkey strings {hotkey_list_strings} to Hotkey object for display: {e}")
-        display_map = {
-            'ctrl': 'Ctrl', 'alt': 'Alt', 'shift': 'Shift', 'cmd': 'Cmd',
-            'space': 'Space', 'enter': 'Enter', 'backspace': 'Backspace',
-            'caps_lock': 'Caps Lock', 'tab': 'Tab', 'esc': 'Esc',
-            'up': 'Up', 'down': 'Down', 'left': 'Left', 'right': 'Right',
-            'insert': 'Insert', 'Insert': 'Ins', 'delete': 'Del', 'home': 'Home', 'end': 'End',
-            'page_up': 'PgUp', 'page_down': 'PgDn',
-            'f1': 'F1', 'f2': 'F2', 'f3': 'F3', 'f4': 'F4', 'f5': 'F5', 'f6': 'F6',
-            'f7': 'F7', 'f8': 'F8', 'f9': 'F9', 'f10': 'F10', 'f11': 'F11', 'f12': 'F12',
-            'mouse_middle': 'Mouse-Middle', 'mouse_x1': 'Mouse-X1', 'mouse_x2': 'Mouse-X2',
-        }
-        parts = []
-        for key_str in sorted(hotkey_list_strings):
-            if key_str in display_map:
-                parts.append(display_map[key_str])
-            elif key_str.startswith('<vk-') and key_str.endswith('>'):
-                parts.append(f"VK-{key_str[4:-1]}")
-            elif key_str.startswith('mouse_button_'):
-                parts.append(f"Mouse-Btn-{key_str[13:]}")
-            elif len(key_str) == 1 and key_str.isalpha():
-                parts.append(key_str.upper())
-            else:
-                parts.append(key_str.replace('_', ' ').title())
-        return "+".join(parts) if parts else "Not Assigned"
+        return str(Hotkey.from_json_serializable(hotkey_list))
+    except (ValueError, TypeError) as e:
+        logging.warning(f"Failed to create Hotkey object for display {hotkey_list}: {e}")
+        return "+".join(s.title() for s in hotkey_list)
 
 def get_pynput_key_string(key):
     if isinstance(key, keyboard.Key):
-        return str(key).split('.')[-1]
+        key_name = key.name
+        if key_name in ('ctrl_l', 'ctrl_r'): return 'ctrl'
+        if key_name in ('alt_l', 'alt_gr', 'alt_r'): return 'alt'
+        if key_name in ('shift_l', 'shift_r'): return 'shift'
+        if key_name in ('cmd_l', 'cmd_r'): return 'cmd'
+        return key_name
     elif isinstance(key, keyboard.KeyCode):
-        if key.char:
-            char_map = {
-                '\x00': 'space',
-                '\r': 'enter',
-                '\t': 'tab',
-                '\x1b': 'esc',
-                '\x08': 'backspace',
-                '\x7f': 'delete',
-            }
-            return char_map.get(key.char, key.char)
-        else:
-            return f"<vk-{key.vk}>"
+        return key.char.lower() if key.char and key.char.isalnum() else f"<vk_{key.vk}>"
     elif isinstance(key, mouse.Button):
-        return {
-            mouse.Button.left: "mouse_left",
-            mouse.Button.right: "mouse_right",
-            mouse.Button.middle: "mouse_middle",
-            mouse.Button.x1: "mouse_x1",
-            mouse.Button.x2: "mouse_x2",
-        }.get(key, f"<mouse-{key.value}>")
-    return str(key)
+        return key.name
+    return None
 
-# --- ToolTip Class ---
-class ToolTip:
-    def __init__(self, widget, text):
+def center_window(win):
+    """Centers a tkinter window on the screen."""
+    win.update_idletasks()
+    width = win.winfo_width()
+    height = win.winfo_height()
+    x = (win.winfo_screenwidth() // 2) - (width // 2)
+    y = (win.winfo_screenheight() // 2) - (height // 2)
+    win.geometry(f'{width}x{height}+{x}+{y}')
+
+# --- UI Components ---
+class ToolTip(Toplevel):
+    def __init__(self, widget, text_func):
+        super().__init__(widget)
         self.widget = widget
-        self.text = text
-        self.tip_window = None
-        self.id = None
-        self.x = 0
-        self.y = 0
+        self.text_func = text_func
+        self.withdraw()
+        self.overrideredirect(True)
+        
+        self.label = ttk.Label(self, text="", justify='left', bootstyle="inverse-light", padding=5)
+        self.label.pack()
+        
         self.widget.bind("<Enter>", self.enter)
         self.widget.bind("<Leave>", self.leave)
-        self.widget.bind("<ButtonPress>", self.leave)
+        self.after_id = None
 
     def enter(self, event=None):
-        self.schedule()
-
-    def unschedule(self):
-        id_ = self.id
-        self.id = None
-        if id_:
-            self.widget.after_cancel(id_)
-
-    def schedule(self):
-        self.unschedule()
-        self.id = self.widget.after(500, self.show)
-
-    def show(self):
-        if self.tip_window or not self.text:
-            return
-        x, y, cx, cy = self.widget.bbox("insert")
-        x += self.widget.winfo_rootx() + 20
-        y += self.widget.winfo_rooty() + self.widget.winfo_height() + 5
-        self.tip_window = tk.Toplevel(self.widget)
-        self.tip_window.wm_overrideredirect(True)
-        self.tip_window.wm_geometry("+%d+%d" % (x, y))
-
-        label = tk.Label(self.tip_window, text=self.text, justify=tk.LEFT,
-                         background="#ffffe0", relief=tk.SOLID, borderwidth=1,
-                         font=("tahoma", "8", "normal"))
-        label.pack(ipadx=1)
+        self.after_id = self.widget.after(500, self.show)
 
     def leave(self, event=None):
-        self.unschedule()
+        if self.after_id:
+            self.widget.after_cancel(self.after_id)
         self.hide()
 
-    def hide(self):
-        if self.tip_window:
-            self.tip_window.destroy()
-        self.tip_window = None
+    def show(self):
+        self.label.config(text=self.text_func())
+        x = self.widget.winfo_rootx()
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
+        self.geometry(f"+{x}+{y}")
+        self.deiconify()
 
-# --- HotkeyRecorder Class ---
+    def hide(self):
+        self.withdraw()
+
 class HotkeyRecorder(Toplevel):
-    def __init__(self, parent, target_name, target_hotkey_var, on_hotkey_recorded_callback):
+    def __init__(self, parent, target_name, on_complete_callback):
         super().__init__(parent)
-        self.parent = parent
-        self.target_name = target_name
-        self.target_hotkey_var = target_hotkey_var
-        self.on_hotkey_recorded_callback = on_hotkey_recorded_callback
+        self.on_complete_callback = on_complete_callback
         
         self.transient(parent)
         self.title("Assign Hotkey")
-        self.geometry("300x100")
+        self.geometry("350x150")
         self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
-
-        self.hotkey_combination_strings = set()
-        self.hotkey_lock = Lock()
-
-        self.label = ttk.Label(self, text=f"Press keys for '{target_name}'...", font=("Helvetica", 10))
-        self.label.pack(pady=10)
-
-        self.display_label = ttk.Label(self, textvariable=self.target_hotkey_var, font=("Helvetica", 12, "bold"), bootstyle="info")
-        self.display_label.pack(pady=5)
-
-        self.keyboard_listener = None
-        self.mouse_listener = None
+        
+        self.recorded_keys = set()
+        self.hotkey_display_var = tk.StringVar(value="Press keys...")
         self.timeout_id = None
 
-        self._start_listening()
-        self._reset_timeout()
+        main_frame = ttk.Frame(self, padding=10)
+        main_frame.pack(fill=BOTH, expand=True)
 
-    def _get_pynput_key_string(self, key_or_button):
-        if isinstance(key_or_button, keyboard.Key):
-            if key_or_button in [keyboard.Key.ctrl_l, keyboard.Key.ctrl_r]:
-                return 'ctrl'
-            elif key_or_button in [keyboard.Key.alt_l, keyboard.Key.alt_r]:
-                return 'alt'
-            elif key_or_button in [keyboard.Key.shift_l, keyboard.Key.shift_r]:
-                return 'shift'
-            elif key_or_button in [keyboard.Key.cmd_l, keyboard.Key.cmd_r]:
-                return 'cmd'
-            key_name = str(key_or_button).split('.')[-1]
-            try:
-                KeyCode(key_name)
-                return key_name
-            except ValueError:
-                return f"<vk-{key_or_button.value}>" if hasattr(key_or_button, 'value') else key_name
-        elif isinstance(key_or_button, keyboard.KeyCode):
-            if key_or_button.char:
-                char = key_or_button.char.lower()
-                try:
-                    KeyCode(char)
-                    return char
-                except ValueError:
-                    return char
-            else:
-                return f"<vk-{key_or_button.vk}>"
-        elif isinstance(key_or_button, mouse.Button):
-            button_map = {
-                mouse.Button.middle: "mouse_middle",
-                mouse.Button.x1: "mouse_x1",
-                mouse.Button.x2: "mouse_x2",
-            }
-            if key_or_button in button_map:
-                return button_map[key_or_button]
-            else:
-                return f"mouse_button_{id(key_or_button)}"
-        return str(key_or_button)
+        ttk.Label(main_frame, text=f"Assigning Hotkey for:", anchor="center").pack()
+        ttk.Label(main_frame, text=f"'{target_name}'", anchor="center", font="-weight bold").pack()
+        ttk.Label(main_frame, textvariable=self.hotkey_display_var, bootstyle="info", font="-size 12 -weight bold", anchor="center").pack(pady=10)
+        ttk.Label(main_frame, text="Press ESC to cancel. Hotkey is saved after a brief pause.", font="-size 8", bootstyle="secondary", anchor="center").pack()
 
-    def _on_key_press(self, key):
-        with self.hotkey_lock:
-            if key == keyboard.Key.esc:
-                self._on_cancel()
-                return False
-            key_str = self._get_pynput_key_string(key)
-            if key_str and key_str not in self.hotkey_combination_strings:
-                self.hotkey_combination_strings.add(key_str)
-                self._update_display()
-            self._reset_timeout()
-        return True
+        parent.center_toplevel(self)
+        self.grab_set()
 
-    def _on_key_release(self, key):
-        with self.hotkey_lock:
-            self._reset_timeout()
-        return True
-
-    def _on_mouse_click(self, x, y, button, pressed):
-        with self.hotkey_lock:
-            if pressed:
-                if button in [mouse.Button.left, mouse.Button.right]:
-                    logging.info(f"HotkeyRecorder: Ignoring disallowed mouse button: {button}")
-                    return True
-                key_str = self._get_pynput_key_string(button)
-                if key_str and key_str not in self.hotkey_combination_strings:
-                    self.hotkey_combination_strings.add(key_str)
-                    self._update_display()
-                self._reset_timeout()
-            return True
-
-    def _update_display(self):
-        display_text = get_hotkey_display_string(list(self.hotkey_combination_strings))
-        self.target_hotkey_var.set(display_text)
-
-    def _reset_timeout(self):
-        if self.timeout_id:
-            self.after_cancel(self.timeout_id)
-        self.timeout_id = self.after(1500, self._finalize_hotkey)
-
-    def _start_listening(self):
-        self.keyboard_listener = keyboard.Listener(
-            on_press=self._on_key_press,
-            on_release=self._on_key_release
-        )
-        self.mouse_listener = mouse.Listener(
-            on_click=self._on_mouse_click
-        )
+        self.keyboard_listener = keyboard.Listener(on_press=self._on_key_press, suppress=False)
+        self.mouse_listener = mouse.Listener(on_click=self._on_mouse_click, suppress=False)
         self.keyboard_listener.start()
         self.mouse_listener.start()
-        logging.info("HotkeyRecorder: Listeners started.")
+        self._reset_timeout()
 
-    def _stop_listening(self):
-        if self.keyboard_listener and self.keyboard_listener.is_alive():
-            self.keyboard_listener.stop()
-            self.keyboard_listener = None
-        if self.mouse_listener and self.mouse_listener.is_alive():
-            self.mouse_listener.stop()
-            self.mouse_listener = None
-        logging.info("HotkeyRecorder: Listeners stopped.")
+    def _on_key_press(self, key):
+        if key == keyboard.Key.esc:
+            self._on_cancel(); return False 
+        key_str = get_pynput_key_string(key)
+        if key_str: self.recorded_keys.add(key_str); self._update_display()
+        self._reset_timeout(); return True
+
+    def _on_mouse_click(self, x, y, button, pressed):
+        if pressed and button not in [mouse.Button.left, mouse.Button.right]:
+            key_str = get_pynput_key_string(button)
+            if key_str: self.recorded_keys.add(key_str); self._update_display()
+            self._reset_timeout()
+        return True
+
+    def _update_display(self):
+        if self.recorded_keys: self.hotkey_display_var.set(get_hotkey_display_string(list(self.recorded_keys)))
+
+    def _reset_timeout(self):
+        if self.timeout_id: self.after_cancel(self.timeout_id)
+        self.timeout_id = self.after(1200, self._finalize_hotkey)
+
+    def _stop_listeners(self):
+        if self.keyboard_listener: self.keyboard_listener.stop()
+        if self.mouse_listener: self.mouse_listener.stop()
 
     def _finalize_hotkey(self):
-        self._stop_listening()
-        if self.timeout_id:
-            self.after_cancel(self.timeout_id)
-            self.timeout_id = None
-        
-        non_modifiers = [k for k in self.hotkey_combination_strings if k not in ['ctrl', 'shift', 'alt', 'cmd']]
-        if not non_modifiers:
-            logging.warning("HotkeyRecorder: No non-modifier key captured, cancelling hotkey assignment.")
-            self.parent.after(0, self.on_hotkey_recorded_callback, [])
-            self.destroy()
-            return
-        
-        self.parent.after(0, self.on_hotkey_recorded_callback, sorted(list(self.hotkey_combination_strings)))
+        self._stop_listeners()
+        non_modifiers = [k for k in self.recorded_keys if k not in ['ctrl', 'shift', 'alt', 'cmd']]
+        self.on_complete_callback(sorted(list(self.recorded_keys)) if non_modifiers else None)
         self.destroy()
 
     def _on_cancel(self):
-        self.hotkey_combination_strings.clear()
-        self._stop_listening()
-        if self.timeout_id:
-            self.after_cancel(self.timeout_id)
-            self.timeout_id = None
-        self.parent.after(0, self.on_hotkey_recorded_callback, [])
-        self.destroy()
-        logging.info("HotkeyRecorder: Assignment cancelled.")
+        if self.timeout_id: self.after_cancel(self.timeout_id)
+        self._stop_listeners(); self.on_complete_callback(None); self.destroy()
 
-# --- Check Dependencies ---
-def check_dependencies():
-    required_python_libs = ["pydub", "pynput", "sounddevice", "pygame", "resampy"]
-    for lib in required_python_libs:
+# --- Core Logic Classes ---
+class DependencyChecker:
+    @staticmethod
+    def run_checks():
         try:
-            importlib.metadata.version(lib)
-            logging.info(f"{lib} library installed")
-        except importlib.metadata.PackageNotFoundError:
-            logging.error(f"{lib} library not installed")
-            messagebox.showerror("Dependency Error", f"Please install the '{lib}' library: pip install {lib}")
+            importlib.metadata.version("pydub")
+            creation_flags = subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
+            subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True, creationflags=creation_flags)
+        except (Exception) as e:
+            logging.critical(f"Dependency check failed: {e}")
+            messagebox.showerror("Dependency Error", "Required libraries (like pydub) or FFmpeg are missing.")
             sys.exit(1)
 
-    try:
-        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
-        logging.info("FFmpeg detected")
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        logging.error("FFmpeg not installed or not in PATH")
-        messagebox.showerror("Dependency Error", "FFmpeg is required. Install it and add to PATH.")
-        sys.exit(1)
-
-check_dependencies()
-
-# --- Ensure Folder Structure ---
-def ensure_folders():
-    for folder in [SOUNDS_DIR, CONFIG_DIR]:
-        try:
-            os.makedirs(folder, exist_ok=True)
-            logging.info(f"Ensured folder exists: {folder}")
-        except Exception as e:
-            logging.error(f"Failed to create folder {folder}: {e}")
-            messagebox.showerror("Setup Error", f"Failed to create folder {folder}: {e}")
-
-# --- MixingBuffer Class ---
-class MixingBuffer:
-    def __init__(self):
-        self.sounds = deque()
-        self.lock = Lock()
-        self.single_sound_mode = False
-
-    def set_single_sound_mode(self, enabled):
-        with self.lock:
-            self.single_sound_mode = enabled
-            logging.info(f"Single sound mode {'enabled' if enabled else 'disabled'}")
-
-    def add_sound(self, data, volume, loop, sound_id, sound_name):
-        with self.lock:
-            if self.single_sound_mode:
-                self.clear_sounds()
-                logging.info(f"Single sound mode active: Cleared mixer before adding {sound_name}")
-            self.sounds.append({"id": sound_id, "data": data, "volume": volume, "loop": loop, "index": 0, "name": sound_name})
-            logging.debug(f"Added sound to mixer: {sound_name}")
-
-    def mix_audio(self, frames):
-        with self.lock:
-            mixed = np.zeros((frames, CHANNELS), dtype=np.float32)
-            sounds_to_remove = []
-            currently_playing_names = []
-            
-            for sound in list(self.sounds):
-                start = sound["index"]
-                end = start + frames
-                
-                if end > len(sound["data"]):
-                    if sound["loop"]:
-                        sound["index"] = 0
-                        start = 0
-                        end = frames
-                        logging.debug(f"Looping sound: {sound['name']}")
-                    else:
-                        sounds_to_remove.append(sound)
-                        continue
-
-                chunk = sound["data"][start:end] * sound["volume"]
-                if len(chunk) < frames:
-                    chunk = np.pad(chunk, ((0, frames - len(chunk)), (0, 0)), mode='constant')
-                
-                mixed += chunk
-                sound["index"] = end
-                currently_playing_names.append(sound["name"])
-
-            for sound in sounds_to_remove:
-                try:
-                    self.sounds.remove(sound)
-                    logging.debug(f"Removed finished sound from mixer: {sound['name']}")
-                except ValueError:
-                    pass
-            
-            np.clip(mixed, -1.0, 1.0, out=mixed)
-            
-            return mixed, currently_playing_names
-
-    def clear_sounds(self):
-        with self.lock:
-            self.sounds.clear()
-            logging.info("Mixer sounds cleared")
-
-    def remove_sound_by_id(self, sound_id):
-        with self.lock:
-            original_len = len(self.sounds)
-            self.sounds = deque([s for s in self.sounds if s["id"] != sound_id])
-            if len(self.sounds) < original_len:
-                logging.info(f"Removed sound with ID {sound_id} from mixer queue.")
-                return True
-            logging.warning(f"Sound with ID {sound_id} not found in mixer queue to remove.")
-            return False
-
-# --- SoundManager Class ---
-class SoundManager:
-    def __init__(self):
-        self.sounds = []
-        self.global_hotkeys = {
-            "stop_all": [],
-            "toggle_mic_to_mixer": [],
-        }
-        ensure_folders()
-        self.load_config()
-
-    def _get_next_id(self):
-        return str(uuid.uuid4())
-
-    def add_sound(self, file_path, custom_name=None):
-        try:
-            audio = pydub.AudioSegment.from_file(file_path)
-            
-            if audio.frame_rate != SAMPLE_RATE:
-                logging.info(f"Resampling audio from {audio.frame_rate}Hz to {SAMPLE_RATE}Hz for {os.path.basename(file_path)}")
-                audio = audio.set_frame_rate(SAMPLE_RATE)
-            if audio.channels != CHANNELS:
-                logging.info(f"Converting audio from {audio.channels} channels to {CHANNELS} channels for {os.path.basename(file_path)}")
-                audio = audio.set_channels(CHANNELS)
-            
-            sound_name = custom_name or os.path.splitext(os.path.basename(file_path))[0]
-            sound_name = re.sub(INVALID_FILENAME_CHARS, '_', sound_name)
-
-            output_path = os.path.join(SOUNDS_DIR, f"{sound_name}.wav")
-            base_name, ext = os.path.splitext(output_path)
-            counter = 1
-            while os.path.exists(output_path):
-                output_path = f"{base_name}_{counter}{ext}"
-                counter += 1
-            
-            audio.export(output_path, format="wav")
-
-            info = sf.info(output_path)
-            new_id = self._get_next_id()
-            
-            new_sound = {
-                "id": new_id,
-                "name": sound_name,
-                "path": output_path,
-                "volume": 1.0,
-                "hotkeys": [],
-                "loop": False,
-                "duration": info.duration,
-            }
-
-            self.sounds.append(new_sound)
-            self.save_config()
-            logging.info(f"Added sound: {sound_name} at {output_path}")
-            return new_sound
-        except Exception as e:
-            logging.error(f"Failed to add sound {file_path}: {e}")
-            messagebox.showerror("Add Sound Error", f"Failed to add sound: {e}")
-            raise
-
-    def rename_sound(self, sound_id, new_name):
-        try:
-            new_name = re.sub(INVALID_FILENAME_CHARS, '_', new_name.strip())
-            if not new_name:
-                raise ValueError("Sound name cannot be empty")
-            
-            sound = next((s for s in self.sounds if s["id"] == sound_id), None)
-            if not sound:
-                raise ValueError("Sound not found")
-            
-            if any(s["name"] == new_name for s in self.sounds if s["id"] != sound_id):
-                raise ValueError("Sound name already exists")
-            
-            old_path = sound["path"]
-            base, ext = os.path.splitext(os.path.basename(old_path))
-            new_path = os.path.join(SOUNDS_DIR, f"{new_name}{ext}")
-            
-            counter = 1
-            while os.path.exists(new_path) and new_path != old_path:
-                new_path = f"{new_name}_{counter}{ext}"
-                counter += 1
-            
-            if old_path != new_path:
-                os.rename(old_path, new_path)
-            
-            sound["name"] = new_name
-            sound["path"] = new_path
-            self.save_config()
-            logging.info(f"Renamed sound {sound_id} to {new_name}")
-            return sound
-        except Exception as e:
-            logging.error(f"Failed to rename sound {sound_id}: {e}")
-            messagebox.showerror("Rename Error", f"Failed to rename sound: {e}")
-            raise
-
-    def remove_sounds(self, sound_ids):
-        try:
-            sounds_to_keep = []
-            for sound in self.sounds:
-                if sound["id"] in sound_ids:
-                    if os.path.exists(sound["path"]):
-                        try:
-                            os.remove(sound["path"])
-                            logging.info(f"Deleted sound file: {sound['path']}")
-                        except Exception as e:
-                            logging.error(f"Failed to delete sound file {sound['path']}: {e}")
-                else:
-                    sounds_to_keep.append(sound)
-            self.sounds = sounds_to_keep
-            self.save_config()
-            logging.info(f"Removed sounds with IDs: {sound_ids}")
-        except Exception as e:
-            logging.error(f"Failed to remove sounds: {e}")
-            messagebox.showerror("Remove Error", f"Failed to remove sounds: {e}")
-
-    def update_sound_hotkeys(self, sound_id, hotkey_list_strings):
-        sound = next((s for s in self.sounds if s["id"] == sound_id), None)
-        if sound:
-            sound["hotkeys"] = hotkey_list_strings
-            self.save_config()
-            logging.info(f"Updated hotkeys for sound {sound_id}: {hotkey_list_strings}")
-        else:
-            logging.warning(f"Attempted to update hotkeys for non-existent sound: {sound_id}")
-
-    def set_global_hotkey(self, action, hotkey_list_strings):
-        if action not in self.global_hotkeys:
-            logging.warning(f"Attempted to set hotkey for unknown action: {action}")
-            return
-        self.global_hotkeys[action] = hotkey_list_strings
-        self.save_config()
-        logging.info(f"Set global hotkey for {action}: {hotkey_list_strings}")
-
-    def set_sound_loop(self, sound_id, loop_status):
-        sound = next((s for s in self.sounds if s["id"] == sound_id), None)
-        if sound:
-            sound["loop"] = loop_status
-            self.save_config()
-            logging.info(f"Updated loop status for sound {sound['id']} to {loop_status}")
-        else:
-            logging.warning(f"Attempted to update loop status for non-existent sound: {sound_id}")
-
-    def get_all_assigned_hotkeys(self):
-        all_hotkeys = set()
-        for sound in self.sounds:
-            if sound["hotkeys"]:
-                all_hotkeys.add(tuple(sorted(sound["hotkeys"])))
-        
-        for action, hotkeys in self.global_hotkeys.items():
-            if hotkeys:
-                all_hotkeys.add(tuple(sorted(hotkeys)))
-        return all_hotkeys
-
-    def save_config(self):
-        try:
-            serializable_sounds = []
-            for sound in self.sounds:
-                s_copy = sound.copy()
-                s_copy.pop("_volume_var_ui", None)
-                s_copy.pop("_loop_var_ui", None)
-                s_copy.pop("_hotkey_label_var_ui", None)
-                serializable_sounds.append(s_copy)
-
-            config_data = {
-                "sounds": serializable_sounds,
-                "global_hotkeys": self.global_hotkeys
-            }
-            with open(CONFIG_FILE, 'w') as f:
-                json.dump(config_data, f, indent=4)
-            logging.info("Soundboard config saved successfully")
-        except Exception as e:
-            logging.error(f"Error saving soundboard config: {e}")
-            messagebox.showerror("Config Error", f"Failed to save soundboard config: {e}")
-
-    def load_config(self):
-        if os.path.exists(CONFIG_FILE):
-            try:
-                with open(CONFIG_FILE, 'r') as f:
-                    data = json.load(f)
-                self.sounds = []
-                for s in data.get("sounds", []):
-                    if os.path.exists(s["path"]):
-                        try:
-                            info = sf.info(s["path"])
-                            sound = {
-                                "id": s.get("id", str(uuid.uuid4())),
-                                "name": s.get("name", os.path.splitext(os.path.basename(s["path"]))[0]),
-                                "path": s["path"],
-                                "volume": s.get("volume", 1.0),
-                                "hotkeys": s.get("hotkeys", []),
-                                "loop": s.get("loop", False),
-                                "duration": info.duration,
-                            }
-                            self.sounds.append(sound)
-                        except Exception as inner_e:
-                            logging.warning(f"Skipping corrupted sound entry {s.get('name', s.get('path'))}: {inner_e}")
-                    else:
-                        logging.warning(f"Skipping sound entry with missing file: {s.get('path', 'Unknown Path')}")
-
-                for key in ["stop_all", "toggle_mic_to_mixer"]:
-                    self.global_hotkeys[key] = data.get("global_hotkeys", {}).get(key, [])
-
-                logging.info("Soundboard config loaded successfully")
-            except Exception as e:
-                logging.error(f"Error loading soundboard config: {e}")
-                messagebox.showwarning("Config Error", f"Failed to load soundboard config: {e}. Starting with empty config.")
-                self.sounds = []
-                self.global_hotkeys = {"stop_all": [], "toggle_mic_to_mixer": []}
-        else:
-            logging.info("No soundboard config file found, starting with empty config")
-
-# --- AudioOutputManager Class ---
-class AudioOutputManager:
-    def __init__(self, app_instance):
-        self.app_instance = app_instance
-        self.p = None
-        self.output_devices = []
-        self.input_devices = []
-        self.virtual_mic_device_id = None
-        self.current_output_device_id_pyaudio = None
-        self.current_input_device_id_pyaudio = None
-        self.current_soundboard_monitor_device_id_pyaudio = None
-        self.current_mic_monitor_device_id_pyaudio = None
-
-        self.mixer = MixingBuffer()
-        self.output_stream_pyaudio = None
-        self.mic_input_stream_pyaudio = None
-        self.soundboard_monitor_stream_pyaudio = None
-        self.mic_monitor_stream_pyaudio = None
-
-        self._mic_input_thread = None
-        self._mic_input_thread_stop_event = Event()
-        self._mic_buffer = deque(maxlen=int(SAMPLE_RATE * CHANNELS * 1 / FRAME_SIZE))
-        self._mic_buffer_lock = Lock()
-
-        self._soundboard_monitor_buffer = deque(maxlen=int(SAMPLE_RATE * CHANNELS * 1 / FRAME_SIZE))
-        self._soundboard_monitor_buffer_lock = Lock()
-
-        self.include_mic_in_mix = False
-        self.soundboard_monitor_enabled = False
-        self.mic_monitor_enabled = False
-
-        self.master_volume = 1.0
-        self.soundboard_monitor_volume = 1.0
-        self.mic_monitor_volume = 1.0
-
-        self._initialize_pyaudio()
-        self._enumerate_devices()
-        self._initialize_pygame_mixer()
-
-    def _initialize_pyaudio(self):
-        if self.p is None:
-            try:
-                self.p = pyaudio.PyAudio()
-                logging.info("PyAudio initialized successfully.")
-            except Exception as e:
-                logging.critical(f"Failed to initialize PyAudio: {e}", exc_info=True)
-                messagebox.showerror("Audio Error", f"Failed to initialize PyAudio. Audio features will be disabled: {e}")
-                self.p = None
-
-    def _enumerate_devices(self):
-        if self.p is None:
-            logging.warning("PyAudio not initialized, skipping device enumeration.")
-            return
-
-        try:
-            self.output_devices = []
-            self.input_devices = []
-            
-            for i in range(self.p.get_device_count()):
-                device = self.p.get_device_info_by_index(i)
-                if device.get('maxOutputChannels', 0) >= CHANNELS and abs(device.get('defaultSampleRate', 0) - SAMPLE_RATE) < 1.0:
-                    self.output_devices.append({"name": device['name'], "index": i, "api_name": self.p.get_host_api_info_by_index(device['hostApi'])['name']})
-                if device.get('maxInputChannels', 0) >= CHANNELS and abs(device.get('defaultSampleRate', 0) - SAMPLE_RATE) < 1.0 and VIRTUAL_MIC_NAME_PARTIAL.lower() not in device['name'].lower():
-                    self.input_devices.append({"name": device['name'], "index": i, "api_name": self.p.get_host_api_info_by_index(device['hostApi'])['name']})
-
-            vb_cable_devices = [dev for dev in self.output_devices if VIRTUAL_MIC_NAME_PARTIAL.lower() in dev['name'].lower()]
-            if vb_cable_devices:
-                wasapi_vb_cable = next((dev for dev in vb_cable_devices if 'wasapi' in dev['api_name'].lower()), None)
-                if wasapi_vb_cable:
-                    self.virtual_mic_device_id = wasapi_vb_cable['index']
-                else:
-                    self.virtual_mic_device_id = vb_cable_devices[0]['index']
-                logging.info(f"Virtual Mic (VB-CABLE) detected at index: {self.virtual_mic_device_id}")
-            else:
-                logging.warning("Virtual Mic (VB-CABLE) not detected. Please ensure it is installed and enabled.")
-
-            self.current_output_device_id_pyaudio = self.virtual_mic_device_id
-            if self.current_output_device_id_pyaudio is None and self.output_devices:
-                self.current_output_device_id_pyaudio = self.output_devices[0]['index']
-                logging.warning(f"No VB-CABLE detected, defaulting output to: {self.output_devices[0]['name']}")
-            elif self.current_output_device_id_pyaudio is None:
-                logging.error("No output devices found at all. Audio playback will not work.")
-
-            self.current_soundboard_monitor_device_id_pyaudio = None
-            self.current_mic_monitor_device_id_pyaudio = None
-            if self.output_devices:
-                self.current_soundboard_monitor_device_id_pyaudio = self.output_devices[0]['index']
-                self.current_mic_monitor_device_id_pyaudio = self.output_devices[0]['index']
-            else:
-                logging.error("No output devices found for monitoring.")
-
-            self.current_input_device_id_pyaudio = None
-            try:
-                default_input_info = self.p.get_default_input_device_info()
-                input_device_candidates = [dev for dev in self.input_devices if dev['name'] == default_input_info['name']]
-                wasapi_input = next((dev for dev in input_device_candidates if 'WASAPI' in dev['api_name'].lower()), None)
-                if wasapi_input:
-                    self.current_input_device_id_pyaudio = wasapi_input['index']
-                elif input_device_candidates:
-                    self.current_input_device_id_pyaudio = input_device_candidates[0]['index']
-                else:
-                    self.current_input_device_id_pyaudio = default_input_info['index']
-            except IOError:
-                logging.warning("No default input device found, attempting to use first available.")
-                if self.input_devices:
-                    self.current_input_device_id_pyaudio = self.input_devices[0]['index']
-                else:
-                    logging.error("No input devices found at all.")
-                    self.current_input_device_id_pyaudio = None
-            
-            logging.info(f"PyAudio devices: Output={self.get_pyaudio_device_name_by_index(self.current_output_device_id_pyaudio)}, "
-                         f"Input={self.get_pyaudio_device_name_by_index(self.current_input_device_id_pyaudio)}, "
-                         f"Virtual Mic={self.virtual_mic_device_id}, "
-                         f"Soundboard Monitor={self.get_pyaudio_device_name_by_index(self.current_soundboard_monitor_device_id_pyaudio)}, "
-                         f"Mic Monitor={self.get_pyaudio_device_name_by_index(self.current_mic_monitor_device_id_pyaudio)}")
-
-        except Exception as e:
-            logging.error(f"Error enumerating devices: {e}", exc_info=True)
-            traceback.print_exc()
-            messagebox.showerror("Audio Device Error", f"Failed to enumerate audio devices: {e}\nTry restarting the app.")
-
-    def _initialize_pygame_mixer(self):
-        if 'pygame' in sys.modules and not pygame.mixer.get_init():
-            try:
-                pygame.mixer.init(frequency=SAMPLE_RATE, channels=CHANNELS)
-                logging.info(f"Pygame mixer re-initialized at {SAMPLE_RATE}Hz, {CHANNELS} channels.")
-            except pygame.error as e:
-                logging.error(f"Pygame mixer re-initialization error: {e}")
-
-    def get_pyaudio_device_name_by_index(self, index):
-        if index is None or self.p is None:
-            return "None"
-        try:
-            return self.p.get_device_info_by_index(index)['name']
-        except Exception:
-            return f"Unknown Device ({index})"
-
-    def start_mic_input_stream(self):
-        if self.mic_input_stream_pyaudio and self.mic_input_stream_pyaudio.is_active():
-            logging.info("Mic input stream already active.")
-            return
-
-        if self.p is None or self.current_input_device_id_pyaudio is None:
-            logging.warning("Cannot start mic input stream: PyAudio not initialized or no input device selected.")
-            return
-        
-        if self._mic_input_thread and self._mic_input_thread.is_alive():
-            logging.info("Mic input reader thread already running, not starting again.")
-            return
-
-        try:
-            self.mic_input_stream_pyaudio = self.p.open(
-                format=pyaudio.paFloat32,
-                channels=CHANNELS,
-                rate=SAMPLE_RATE,
-                input=True,
-                frames_per_buffer=FRAME_SIZE,
-                input_device_index=self.current_input_device_id_pyaudio,
-            )
-            logging.info(f"PyAudio mic input stream opened from Mic ({self.current_input_device_id_pyaudio}).")
-
-            self._mic_input_thread_stop_event.clear()
-            self._mic_input_thread = threading.Thread(target=self._mic_input_reader_thread, daemon=True)
-            self._mic_input_thread.start()
-            logging.info("Mic input reader thread started.")
-
-        except Exception as e:
-            logging.error(f"Failed to start mic input stream: {e}", exc_info=True)
-            traceback.print_exc()
-            messagebox.showerror("Audio Error", f"Failed to start mic input stream: {e}")
-
-    def stop_mic_input_stream(self):
-        if self._mic_input_thread and self._mic_input_thread.is_alive():
-            self._mic_input_thread_stop_event.set()
-            self._mic_input_thread.join(timeout=1)
-            if self._mic_input_thread.is_alive():
-                logging.warning("Mic input reader thread did not stop gracefully.")
-            self._mic_input_thread = None
-        
-        if self.mic_input_stream_pyaudio:
-            try:
-                if self.mic_input_stream_pyaudio.is_active():
-                    self.mic_input_stream_pyaudio.stop_stream()
-                self.mic_input_stream_pyaudio.close()
-            except OSError as e:
-                logging.warning(f"Error stopping/closing mic input stream: {e}")
-                traceback.print_exc()
-            finally:
-                self.mic_input_stream_pyaudio = None
-            logging.info("PyAudio mic input stream stopped and closed.")
-        
-        with self._mic_buffer_lock:
-            self._mic_buffer.clear()
-            logging.debug("Mic buffer cleared.")
-
-    def _mic_input_reader_thread(self):
-        logging.info("Mic input reader thread started.")
-        while not self._mic_input_thread_stop_event.is_set():
-            try:
-                if self.mic_input_stream_pyaudio and self.mic_input_stream_pyaudio.is_active():
-                    raw_mic_data = self.mic_input_stream_pyaudio.read(FRAME_SIZE, exception_on_overflow=False)
-                    mic_data_np = np.frombuffer(raw_mic_data, dtype=np.float32).reshape(-1, CHANNELS)
-                    
-                    with self._mic_buffer_lock:
-                        self._mic_buffer.append(mic_data_np)
-                else:
-                    time.sleep(0.01)
-            except IOError as e:
-                logging.warning(f"Mic input stream read error in reader thread: {e}")
-                traceback.print_exc()
-                self._mic_input_thread_stop_event.set()
-            except Exception as e:
-                logging.error(f"Unexpected error in mic input reader thread: {e}", exc_info=True)
-                traceback.print_exc()
-                self._mic_input_thread_stop_event.set()
-        logging.info("Mic input reader thread stopped.")
-
-    def _get_mic_data_from_buffer(self, frame_count):
-        mic_data = np.zeros((frame_count, CHANNELS), dtype=np.float32)
-        with self._mic_buffer_lock:
-            if not self._mic_buffer:
-                return mic_data
-
-            current_frames = 0
-            while current_frames < frame_count and self._mic_buffer:
-                chunk = self._mic_buffer.popleft()
-                frames_to_copy = min(frame_count - current_frames, len(chunk))
-                mic_data[current_frames : current_frames + frames_to_copy] = chunk[:frames_to_copy]
-                current_frames += frames_to_copy
-                
-                if frames_to_copy < len(chunk):
-                    self._mic_buffer.appendleft(chunk[frames_to_copy:])
-        return mic_data
-
-    def start_main_audio_output_stream(self):
-        if self.output_stream_pyaudio and self.output_stream_pyaudio.is_active():
-            logging.info("Main audio output stream already active.")
-            return
-
-        if self.p is None or self.current_output_device_id_pyaudio is None:
-            logging.warning("Cannot start main audio output stream: PyAudio not initialized or no output device selected.")
-            return
-
-        try:
-            self.output_stream_pyaudio = self.p.open(
-                format=pyaudio.paFloat32,
-                channels=CHANNELS,
-                rate=SAMPLE_RATE,
-                output=True,
-                frames_per_buffer=FRAME_SIZE,
-                output_device_index=self.current_output_device_id_pyaudio,
-                stream_callback=self._main_output_callback
-            )
-            logging.info(f"PyAudio main output stream opened to Virtual Mic ({self.current_output_device_id_pyaudio}).")
-        except Exception as e:
-            logging.error(f"Failed to start main audio output stream: {e}", exc_info=True)
-            traceback.print_exc()
-            messagebox.showerror("Audio Error", f"Failed to start main audio output stream: {e}")
-
-    def _main_output_callback(self, in_data, frame_count, time_info, status):
-        mixed_audio, playing_names = self.mixer.mix_audio(frame_count)
-        
-        with self._soundboard_monitor_buffer_lock:
-            self._soundboard_monitor_buffer.append(mixed_audio.copy())
-        
-        with current_playing_sound_details_lock:
-            current_playing_sound_details["names"] = playing_names
-            current_playing_sound_details["active"] = len(playing_names) > 0 or self.include_mic_in_mix
-        
-        if self.include_mic_in_mix:
-            mic_data = self._get_mic_data_from_buffer(frame_count)
-            mixed_audio += mic_data
-            np.clip(mixed_audio, -1.0, 1.0, out=mixed_audio)
-        
-        mixed_audio *= self.master_volume
-        return (mixed_audio.tobytes(), pyaudio.paContinue)
-
-    def start_soundboard_monitor_stream(self):
-        if self.soundboard_monitor_stream_pyaudio and self.soundboard_monitor_stream_pyaudio.is_active():
-            logging.info("Soundboard monitor stream already active.")
-            return
-
-        if self.p is None or self.current_soundboard_monitor_device_id_pyaudio is None:
-            logging.warning("Cannot start soundboard monitor stream: PyAudio not initialized or no monitor device selected.")
-            return
-
-        try:
-            self.soundboard_monitor_stream_pyaudio = self.p.open(
-                format=pyaudio.paFloat32,
-                channels=CHANNELS,
-                rate=SAMPLE_RATE,
-                output=True,
-                frames_per_buffer=FRAME_SIZE,
-                output_device_index=self.current_soundboard_monitor_device_id_pyaudio,
-                stream_callback=self._soundboard_monitor_callback
-            )
-            logging.info(f"PyAudio soundboard monitor stream opened to device ({self.current_soundboard_monitor_device_id_pyaudio}).")
-        except Exception as e:
-            logging.error(f"Failed to start soundboard monitor stream: {e}", exc_info=True)
-            traceback.print_exc()
-            messagebox.showerror("Audio Error", f"Failed to start soundboard monitor stream: {e}")
-
-    def _soundboard_monitor_callback(self, in_data, frame_count, time_info, status):
-        with self._soundboard_monitor_buffer_lock:
-            if self._soundboard_monitor_buffer:
-                data = self._soundboard_monitor_buffer.popleft()
-                if len(data) < frame_count:
-                    data = np.pad(data, ((0, frame_count - len(data)), (0, 0)), mode='constant')
-                elif len(data) > frame_count:
-                    self._soundboard_monitor_buffer.appendleft(data[frame_count:])
-                    data = data[:frame_count]
-                data *= self.soundboard_monitor_volume
-                return (data.tobytes(), pyaudio.paContinue)
-            return (np.zeros((frame_count, CHANNELS), dtype=np.float32).tobytes(), pyaudio.paContinue)
-
-    def start_mic_monitor_stream(self):
-        if self.mic_monitor_stream_pyaudio and self.mic_monitor_stream_pyaudio.is_active():
-            logging.info("Mic monitor stream already active.")
-            return
-
-        if self.p is None or self.current_mic_monitor_device_id_pyaudio is None:
-            logging.warning("Cannot start mic monitor stream: PyAudio not initialized or no mic monitor device selected.")
-            return
-
-        try:
-            self.mic_monitor_stream_pyaudio = self.p.open(
-                format=pyaudio.paFloat32,
-                channels=CHANNELS,
-                rate=SAMPLE_RATE,
-                output=True,
-                frames_per_buffer=FRAME_SIZE,
-                output_device_index=self.current_mic_monitor_device_id_pyaudio,
-                stream_callback=self._mic_monitor_callback
-            )
-            logging.info(f"PyAudio mic monitor stream opened to device ({self.current_mic_monitor_device_id_pyaudio}).")
-        except Exception as e:
-            logging.error(f"Failed to start mic monitor stream: {e}", exc_info=True)
-            traceback.print_exc()
-            messagebox.showerror("Audio Error", f"Failed to start mic monitor stream: {e}")
-
-    def _mic_monitor_callback(self, in_data, frame_count, time_info, status):
-        mic_data = self._get_mic_data_from_buffer(frame_count)
-        mic_data *= self.mic_monitor_volume
-        return (mic_data.tobytes(), pyaudio.paContinue)
-
-    def stop_main_audio_output_stream(self):
-        if self.output_stream_pyaudio:
-            try:
-                if self.output_stream_pyaudio.is_active():
-                    self.output_stream_pyaudio.stop_stream()
-                self.output_stream_pyaudio.close()
-            except OSError as e:
-                logging.warning(f"Error stopping/closing main output stream: {e}")
-                traceback.print_exc()
-            finally:
-                self.output_stream_pyaudio = None
-            logging.info("PyAudio main output stream stopped and closed.")
-
-    def stop_soundboard_monitor_stream(self):
-        if self.soundboard_monitor_stream_pyaudio:
-            try:
-                if self.soundboard_monitor_stream_pyaudio.is_active():
-                    self.soundboard_monitor_stream_pyaudio.stop_stream()
-                self.soundboard_monitor_stream_pyaudio.close()
-            except OSError as e:
-                logging.warning(f"Error stopping/closing soundboard monitor stream: {e}")
-                traceback.print_exc()
-            finally:
-                self.soundboard_monitor_stream_pyaudio = None
-            logging.info("PyAudio soundboard monitor stream stopped and closed.")
-
-    def stop_mic_monitor_stream(self):
-        if self.mic_monitor_stream_pyaudio:
-            try:
-                if self.mic_monitor_stream_pyaudio.is_active():
-                    self.mic_monitor_stream_pyaudio.stop_stream()
-                self.mic_monitor_stream_pyaudio.close()
-            except OSError as e:
-                logging.warning(f"Error stopping/closing mic monitor stream: {e}")
-                traceback.print_exc()
-            finally:
-                self.mic_monitor_stream_pyaudio = None
-            logging.info("PyAudio mic monitor stream stopped and closed.")
-
-    def restart_audio_streams(self):
-        self.stop_mic_input_stream()
-        self.stop_main_audio_output_stream()
-        self.stop_soundboard_monitor_stream()
-        self.stop_mic_monitor_stream()
-
-        self.start_main_audio_output_stream()
-
-        if self.include_mic_in_mix:
-            self.start_mic_input_stream()
-
-        if self.soundboard_monitor_enabled:
-            self.start_soundboard_monitor_stream()
-
-        if self.mic_monitor_enabled:
-            self.start_mic_monitor_stream()
-
-        logging.info("Audio streams restarted with current settings.")
-
-    def close(self):
-        self.stop_mic_input_stream()
-        self.stop_main_audio_output_stream()
-        self.stop_soundboard_monitor_stream()
-        self.stop_mic_monitor_stream()
-
-        with self._soundboard_monitor_buffer_lock:
-            self._soundboard_monitor_buffer.clear()
-            logging.debug("Soundboard monitor buffer cleared.")
-
-        if self.p is not None:
-            try:
-                self.p.terminate()
-                logging.info("PyAudio terminated.")
-            except Exception as e:
-                logging.error(f"Error terminating PyAudio: {e}", exc_info=True)
-            self.p = None
-
-        if 'pygame' in sys.modules and pygame.mixer.get_init():
-            pygame.mixer.quit()
-            logging.info("Pygame mixer quit on close.")
-
-# --- KeybindManager Class ---
-class KeybindManager:
-    def __init__(self, app):
-        self.app = app
-        self.hotkey_registry = {}
-        self.keyboard_listener = None
-        self.mouse_listener = None
-        self.current_hotkey_assignment_target_id = None
-        self.active_keys = set()
-
-    def update_hotkeys(self):
-        self.stop()
-        self.hotkey_registry = {}
-        logging.debug("Updating hotkeys...")
-
-        for sound in self.app.sound_manager.sounds:
-            if sound.get("hotkeys"):
-                try:
-                    hotkey_obj = Hotkey.from_json_serializable(sound["hotkeys"])
-                    self.hotkey_registry[hotkey_obj] = lambda sid=sound["id"]: self.app.play_sound(sid)
-                    logging.debug(f"Registered hotkey for sound {sound['id']}: {hotkey_obj}")
-                except Exception as e:
-                    logging.error(f"Failed to register hotkey for sound {sound['id']}: {e}", exc_info=True)
-
-        for action, hotkeys in self.app.sound_manager.global_hotkeys.items():
-            if hotkeys:
-                try:
-                    hotkey_obj = Hotkey.from_json_serializable(hotkeys)
-                    if action == "stop_all":
-                        self.hotkey_registry[hotkey_obj] = self.app.stop_all_sounds
-                    elif action == "toggle_mic_to_mixer":
-                        self.hotkey_registry[hotkey_obj] = self.app.toggle_mic_to_mixer_from_hotkey
-                    logging.debug(f"Registered global hotkey for {action}: {hotkey_obj}")
-                except Exception as e:
-                    logging.error(f"Failed to register global hotkey for {action}: {e}", exc_info=True)
-
-        if self.hotkey_registry:
-            self.start()
-            logging.info(f"Registered {len(self.hotkey_registry)} hotkeys.")
-        else:
-            logging.info("No active hotkeys to listen for. Not starting pynput listeners.")
-
-    def start(self):
-        self.stop()
-        self.active_keys = set()
-
-        def on_press(key):
-            try:
-                key_str = get_pynput_key_string(key)
-                self.active_keys.add(key_str)
-                logging.debug(f"Key pressed: {key_str}, Active keys: {self.active_keys}")
-                self.check_hotkeys()
-            except Exception as e:
-                logging.error(f"Error processing key press: {e}", exc_info=True)
-
-        def on_release(key):
-            try:
-                key_str = get_pynput_key_string(key)
-                self.active_keys.discard(key_str)
-                logging.debug(f"Key released: {key_str}, Active keys: {self.active_keys}")
-            except Exception as e:
-                logging.error(f"Error processing key release: {e}", exc_info=True)
-
-        def on_click(x, y, button, pressed):
-            try:
-                if not pressed:
-                    return
-                if button in [mouse.Button.left, mouse.Button.right]:
-                    return
-                button_str = get_pynput_key_string(button)
-                self.active_keys.add(button_str)
-                logging.debug(f"Mouse button pressed: {button_str}, Active keys: {self.active_keys}")
-                self.check_hotkeys()
-                self.active_keys.discard(button_str)
-            except Exception as e:
-                logging.error(f"Error processing mouse click: {e}", exc_info=True)
-
-        self.keyboard_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-        self.mouse_listener = mouse.Listener(on_click=on_click)
-        self.keyboard_listener.start()
-        self.mouse_listener.start()
-        logging.info("Started pynput listeners for keyboard and mouse.")
-
-    def check_hotkeys(self):
-        for hotkey_obj, callback in self.hotkey_registry.items():
-            hotkey_strings = set(hotkey_obj.to_json_serializable())
-            if hotkey_strings == self.active_keys:
-                logging.debug(f"Hotkey triggered: {hotkey_obj}")
-                callback()
-                non_modifiers = [k for k in hotkey_strings if k not in ['ctrl', 'shift', 'alt', 'cmd']]
-                for k in non_modifiers:
-                    self.active_keys.discard(k)
-
-    def stop(self):
-        if self.keyboard_listener and self.keyboard_listener.is_alive():
-            self.keyboard_listener.stop()
-            self.keyboard_listener = None
-        if self.mouse_listener and self.mouse_listener.is_alive():
-            self.mouse_listener.stop()
-            self.mouse_listener = None
-        self.active_keys.clear()
-        logging.info("Stopped pynput listeners.")
-
-    def set_hotkey_assignment_target(self, target_id):
-        self.current_hotkey_assignment_target_id = target_id
-        logging.debug(f"Set hotkey assignment target to: {target_id}")
-
-# --- AppSettingsManager Class ---
 class AppSettingsManager:
-    def __init__(self):
-        self.settings = {}
-        self.load_settings()
-
+    def __init__(self): self.settings = self.load_settings()
     def load_settings(self):
         if os.path.exists(APP_SETTINGS_FILE):
             try:
-                with open(APP_SETTINGS_FILE, 'r') as f:
-                    self.settings = json.load(f)
-                logging.info("App settings loaded successfully")
-            except Exception as e:
-                logging.error(f"Error loading app settings: {e}")
-                self.settings = {}
-                messagebox.showwarning("Settings Error", f"Failed to load app settings: {e}. Using defaults.")
-        else:
-            logging.info("No app settings file found, using defaults")
-            self.settings = {}
-
-    def save_settings(self, settings):
-        self.settings.update(settings)
+                with open(APP_SETTINGS_FILE, 'r') as f: return json.load(f)
+            except json.JSONDecodeError as e: logging.error(f"Failed to load app settings file: {e}")
+        return {}
+    def save_settings(self, settings_dict):
+        self.settings.update(settings_dict)
         try:
-            with open(APP_SETTINGS_FILE, 'w') as f:
-                json.dump(self.settings, f, indent=4)
-            logging.info("App settings saved successfully")
-        except Exception as e:
-            logging.error(f"Error saving app settings: {e}")
-            messagebox.showerror("Settings Error", f"Failed to save app settings: {e}")
+            with open(APP_SETTINGS_FILE, 'w') as f: json.dump(self.settings, f, indent=4)
+        except IOError as e: logging.error(f"Failed to save app settings: {e}")
+    def get_setting(self, key, default=None): return self.settings.get(key, default)
 
-    def get_settings(self):
-        return self.settings
+class MixingBuffer:
+    def __init__(self): self.sounds, self.lock, self.single_sound_mode = deque(), Lock(), False
+    def set_single_sound_mode(self, enabled):
+        with self.lock: self.single_sound_mode = enabled
+    def add_sound(self, data, volume, loop, sound_id, sound_name):
+        with self.lock:
+            if self.single_sound_mode: self.sounds.clear()
+            self.sounds.append({"id": sound_id, "data": data, "volume": volume, "loop": loop, "index": 0, "name": sound_name})
+    def mix_audio(self, frames):
+        with self.lock:
+            mixed = np.zeros((frames, CHANNELS), dtype=np.float32)
+            sounds_to_remove, playing_names = [], []
+            for sound in list(self.sounds):
+                start, end, data_len = sound["index"], sound["index"] + frames, len(sound["data"])
+                chunk = sound["data"][start:end]
+                actual_chunk_len = len(chunk)
+                if actual_chunk_len < frames:
+                    if sound["loop"]:
+                        remaining_frames = frames - actual_chunk_len
+                        sound["index"] = remaining_frames % data_len
+                        while remaining_frames > 0:
+                            frames_to_take = min(remaining_frames, data_len)
+                            chunk = np.concatenate((chunk, sound["data"][0:frames_to_take]))
+                            remaining_frames -= frames_to_take
+                    else:
+                        sounds_to_remove.append(sound)
+                        chunk = np.pad(chunk, ((0, frames - actual_chunk_len), (0, 0)), 'constant')
+                else: sound["index"] = end % data_len if sound["loop"] else end
+                mixed += chunk * sound["volume"]
+                if sound not in sounds_to_remove: playing_names.append(sound["name"])
+            for sound in sounds_to_remove:
+                if sound in self.sounds: self.sounds.remove(sound)
+            np.clip(mixed, -1.0, 1.0, out=mixed)
+            return mixed, playing_names
+    def clear_sounds(self):
+        with self.lock: self.sounds.clear()
+    def remove_sound_by_id(self, sound_id):
+        with self.lock:
+            initial_len = len(self.sounds)
+            self.sounds = deque(s for s in self.sounds if s["id"] != sound_id)
+            return len(self.sounds) < initial_len
 
-# --- SoundboardApp Class ---
-class SoundboardApp(ttk.Window):
+class SoundManager:
     def __init__(self):
-        super().__init__(title="WarpBoard Soundboard", themename="litera")
-        self.geometry("800x600")
-        ensure_folders()
-        self.sound_manager = SoundManager()
-        self.audio_manager = AudioOutputManager(self)
-        self.app_settings_manager = AppSettingsManager()
-        self.keybind_manager = KeybindManager(self)
-        
-        self.selected_sound_ids = set()
-        self._interactive_widgets = []
-        
-        self.include_mic_in_mix_var = tk.BooleanVar(value=False)
-        self.soundboard_monitor_enabled_var = tk.BooleanVar(value=True)
-        self.mic_monitor_enabled_var = tk.BooleanVar(value=False)
-        self.master_volume_var = tk.DoubleVar(value=100.0)
-        self.soundboard_monitor_volume_var = tk.DoubleVar(value=100.0)
-        self.mic_monitor_volume_var = tk.DoubleVar(value=100.0)
-        self.auto_start_include_mic_in_mix_var = tk.BooleanVar(value=False)
-        self.single_sound_mode_var = tk.BooleanVar(value=False)
-        self.current_theme_var = tk.StringVar(value=self.style.theme.name)
-        self.stop_all_hotkey_var = tk.StringVar(value="Not Assigned")
-        self.toggle_mic_to_mixer_hotkey_var = tk.StringVar(value="Not Assigned")
-        self.status_message_var = tk.StringVar(value="Ready.")
-        self.currently_playing_info = tk.StringVar(value="Now Playing: None")
-        self.mic_status_info = tk.StringVar(value="Mic: Off")
-        self.soundboard_output_status_info = tk.StringVar(value="Soundboard Output: Off")
-        self.assign_button_style_var = tk.StringVar(value="primary")
-        self.key_assignment_in_progress_var = tk.BooleanVar(value=False)
-        
-        self.protocol("WM_DELETE_WINDOW", self._on_app_closure)
-        self._create_ui()
-        self._apply_settings_to_ui()
-        
-        self.now_playing_updater_thread = threading.Thread(target=self._update_now_playing_periodically, daemon=True)
-        self.now_playing_updater_thread.start()
-        
-        self.populate_sound_grid()
-        self.keybind_manager.update_hotkeys()
-
-    def _create_ui(self):
-        self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill=BOTH, expand=True, padx=10, pady=10)
-        self._interactive_widgets.append(self.notebook)
-        
-        self.soundboard_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.soundboard_tab, text="Soundboard")
-
-        self.settings_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.settings_tab, text="Settings")
-
-        self.settings_notebook = ttk.Notebook(self.settings_tab)
-        self.settings_notebook.pack(fill=BOTH, expand=True, padx=5, pady=5)
-
-        
-        self.audio_settings_tab = ttk.Frame(self.settings_notebook)
-        self.hotkeys_settings_tab = ttk.Frame(self.settings_notebook)
-        self.general_settings_tab = ttk.Frame(self.settings_notebook)
-        self.about_tab = ttk.Frame(self.settings_notebook)
-        
-        self.settings_notebook.add(self.audio_settings_tab, text="Audio Settings")
-        self.settings_notebook.add(self.hotkeys_settings_tab, text="Global Hotkeys")
-        self.settings_notebook.add(self.general_settings_tab, text="General")
-        self.settings_notebook.add(self.about_tab, text="About")
-        
-        self._interactive_widgets.extend([self.audio_settings_tab, self.hotkeys_settings_tab, self.general_settings_tab, self.about_tab])
-        
-        self._create_soundboard_widgets(self.soundboard_tab)
-        self._create_audio_settings_widgets(self.audio_settings_tab)
-        self._create_hotkeys_settings_widgets(self.hotkeys_settings_tab)
-        self._create_general_settings_widgets(self.general_settings_tab)
-        self._create_about_widgets(self.about_tab)
-        
-        self.status_frame = ttk.Frame(self)
-        self.status_frame.pack(fill=X, padx=5, pady=5)
-        
-        self.status_label = ttk.Label(self.status_frame, textvariable=self.status_message_var, bootstyle="info")
-        self.status_label.pack(side=LEFT, padx=5)
-        
-        self.currently_playing_label = ttk.Label(self.status_frame, textvariable=self.currently_playing_info, bootstyle="info")
-        self.currently_playing_label.pack(side=LEFT, padx=20)
-        
-        self.mic_status_label = ttk.Label(self.status_frame, textvariable=self.mic_status_info, bootstyle="danger")
-        self.mic_status_label.pack(side=LEFT, padx=20)
-        
-        self.soundboard_output_status_label = ttk.Label(self.status_frame, textvariable=self.soundboard_output_status_info, bootstyle="danger")
-        self.soundboard_output_status_label.pack(side=LEFT, padx=20)
-
-    def _create_soundboard_widgets(self, parent_frame):
-        button_frame = ttk.Frame(parent_frame)
-        button_frame.pack(fill=X, padx=5, pady=5)
-        
-        add_button = ttk.Button(button_frame, text="Add Sound", command=self.add_sound, bootstyle="primary")
-        add_button.pack(side=LEFT, padx=5)
-        self._interactive_widgets.append(add_button)
-        
-        remove_button = ttk.Button(button_frame, text="Remove Selected", command=self.remove_selected_sounds, bootstyle="danger")
-        remove_button.pack(side=LEFT, padx=5)
-        self._interactive_widgets.append(remove_button)
-        
-        play_selected_button = ttk.Button(button_frame, text="Play Selected", command=self.play_selected_sound, bootstyle="success")
-        play_selected_button.pack(side=LEFT, padx=5)
-        self._interactive_widgets.append(play_selected_button)
-        
-        stop_all_button = ttk.Button(button_frame, text="Stop All", command=self.stop_all_sounds, bootstyle="danger")
-        stop_all_button.pack(side=LEFT, padx=5)
-        self._interactive_widgets.append(stop_all_button)
-        
-        self.sound_grid_frame = ttk.Frame(parent_frame)
-        self.sound_grid_frame.pack(fill=BOTH, expand=True, padx=5, pady=5)
-        self._interactive_widgets.append(self.sound_grid_frame)
-        
-        self.sound_grid_canvas = tk.Canvas(self.sound_grid_frame)
-        self.sound_grid_scrollbar = ttk.Scrollbar(self.sound_grid_frame, orient=VERTICAL, command=self.sound_grid_canvas.yview)
-        self.sound_grid_canvas.configure(yscrollcommand=self.sound_grid_scrollbar.set)
-        
-        self.sound_grid_scrollbar.pack(side=RIGHT, fill=Y)
-        self.sound_grid_canvas.pack(side=LEFT, fill=BOTH, expand=True)
-        self._interactive_widgets.append(self.sound_grid_scrollbar)
-        
-        self.inner_sound_grid_frame = ttk.Frame(self.sound_grid_canvas)
-        self.sound_grid_canvas.create_window((0, 0), window=self.inner_sound_grid_frame, anchor="nw")
-        
-        self.inner_sound_grid_frame.bind("<Configure>", lambda e: self.sound_grid_canvas.configure(scrollregion=self.sound_grid_canvas.bbox("all")))
-        
-        self.sound_grid_canvas.bind_all("<MouseWheel>", self._on_mouse_wheel)
-        self.sound_grid_canvas.bind_all("<Button-4>", self._on_mouse_wheel)
-        self.sound_grid_canvas.bind_all("<Button-5>", self._on_mouse_wheel)
-
-    def _on_mouse_wheel(self, event):
-        if self.sound_grid_canvas.winfo_ismapped():
-            if event.num == 4 or event.delta > 0:
-                self.sound_grid_canvas.yview_scroll(-1, "units")
-            elif event.num == 5 or event.delta < 0:
-                self.sound_grid_canvas.yview_scroll(1, "units")
-            return "break"
-
-    def _create_audio_settings_widgets(self, parent_frame):
-        output_frame = ttk.LabelFrame(parent_frame, text="Audio Output Settings", padding=10)
-        output_frame.pack(fill=X, pady=10)
-        self._interactive_widgets.append(output_frame)
-        
-        output_label = ttk.Label(output_frame, text="Main Output Device (Virtual Mic):")
-        output_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.output_device_combobox = ttk.Combobox(output_frame, state="readonly")
-        self.output_device_combobox.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        self.output_device_combobox.bind("<<ComboboxSelected>>", self._on_output_device_selected)
-        ToolTip(self.output_device_combobox, "Select the output device for the mixed audio (soundboard + mic).")
-        self._interactive_widgets.append(self.output_device_combobox)
-        
-        input_label = ttk.Label(output_frame, text="Physical Mic Input Device:")
-        input_label.grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        self.input_device_combobox = ttk.Combobox(output_frame, state="readonly")
-        self.input_device_combobox.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-        self.input_device_combobox.bind("<<ComboboxSelected>>", self._on_input_device_selected)
-        ToolTip(self.input_device_combobox, "Select your physical microphone for input.")
-        self._interactive_widgets.append(self.input_device_combobox)
-        
-        soundboard_monitor_label = ttk.Label(output_frame, text="Soundboard Monitor Device (Local):")
-        soundboard_monitor_label.grid(row=2, column=0, padx=5, pady=5, sticky="w")
-        self.soundboard_monitor_device_combobox = ttk.Combobox(output_frame, state="readonly")
-        self.soundboard_monitor_device_combobox.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
-        self.soundboard_monitor_device_combobox.bind("<<ComboboxSelected>>", self._on_soundboard_monitor_device_selected)
-        ToolTip(self.soundboard_monitor_device_combobox, "Select the device to monitor only the soundboard audio locally (e.g., speakers).")
-        self._interactive_widgets.append(self.soundboard_monitor_device_combobox)
-        
-        mic_monitor_label = ttk.Label(output_frame, text="Mic Playback Monitor Device (Local):")
-        mic_monitor_label.grid(row=3, column=0, padx=5, pady=5, sticky="w")
-        self.mic_monitor_device_combobox = ttk.Combobox(output_frame, state="readonly")
-        self.mic_monitor_device_combobox.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
-        self.mic_monitor_device_combobox.bind("<<ComboboxSelected>>", self._on_mic_monitor_device_selected)
-        ToolTip(self.mic_monitor_device_combobox, "Select the device to monitor only your microphone audio locally (e.g., headphones).")
-        self._interactive_widgets.append(self.mic_monitor_device_combobox)
-        
-        output_frame.columnconfigure(1, weight=1)
-        
-        controls_frame = ttk.LabelFrame(parent_frame, text="Audio Controls", padding=10)
-        controls_frame.pack(fill=X, pady=10)
-        self._interactive_widgets.append(controls_frame)
-        
-        include_mic_check = ttk.Checkbutton(controls_frame, text="Include Mic in Audio Mix", variable=self.include_mic_in_mix_var, command=self.toggle_include_mic_in_mix)
-        include_mic_check.grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky="w")
-        ToolTip(include_mic_check, "Enable to include your microphone audio in the virtual microphone output.")
-        self._interactive_widgets.append(include_mic_check)
-        
-        soundboard_monitor_check = ttk.Checkbutton(controls_frame, text="Enable Local Soundboard Monitoring", variable=self.soundboard_monitor_enabled_var, command=self.toggle_soundboard_monitor)
-        soundboard_monitor_check.grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky="w")
-        ToolTip(soundboard_monitor_check, "Enable to hear the soundboard audio through your local speakers/headphones.")
-        self._interactive_widgets.append(soundboard_monitor_check)
-        
-        mic_monitor_check = ttk.Checkbutton(controls_frame, text="Enable Local Mic Playback Monitoring", variable=self.mic_monitor_enabled_var, command=self.toggle_mic_monitor)
-        mic_monitor_check.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky="w")
-        ToolTip(mic_monitor_check, "Enable to hear your microphone audio through your local speakers/headphones.")
-        self._interactive_widgets.append(mic_monitor_check)
-        
-        controls_frame.columnconfigure(1, weight=1)
-        
-        volume_frame = ttk.LabelFrame(parent_frame, text="Volume Controls", padding=10)
-        volume_frame.pack(fill=X, pady=10)
-        self._interactive_widgets.append(volume_frame)
-        
-        master_volume_label = ttk.Label(volume_frame, text="Master Output Volume:")
-        master_volume_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.master_volume_slider = ttk.Scale(volume_frame, from_=0, to=100, variable=self.master_volume_var, command=self._on_master_volume_changed)
-        self.master_volume_slider.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        self._interactive_widgets.append(self.master_volume_slider)
-        self.master_volume_value_label = ttk.Label(volume_frame, text=f"{int(self.master_volume_var.get())}%")
-        self.master_volume_var.trace_add("write", lambda name, index, mode: self.master_volume_value_label.config(text=f"{int(self.master_volume_var.get())}%"))
-        self.master_volume_value_label.grid(row=0, column=2, padx=5, pady=5, sticky="w")
-        self.master_volume_slider.bind("<ButtonRelease-1>", self._on_master_volume_released)
-        ToolTip(self.master_volume_slider, "Controls the overall volume of the mixed audio sent to the virtual microphone.")
-        
-        soundboard_monitor_volume_label = ttk.Label(volume_frame, text="Local Soundboard Monitor Volume:")
-        soundboard_monitor_volume_label.grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        self.soundboard_monitor_volume_slider = ttk.Scale(volume_frame, from_=0, to=100, variable=self.soundboard_monitor_volume_var, command=self._on_soundboard_monitor_volume_changed)
-        self.soundboard_monitor_volume_slider.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-        self._interactive_widgets.append(self.soundboard_monitor_volume_slider)
-        self.soundboard_monitor_volume_value_label = ttk.Label(volume_frame, text=f"{int(self.soundboard_monitor_volume_var.get())}%")
-        self.soundboard_monitor_volume_var.trace_add("write", lambda name, index, mode: self.soundboard_monitor_volume_value_label.config(text=f"{int(self.soundboard_monitor_volume_var.get())}%"))
-        self.soundboard_monitor_volume_value_label.grid(row=1, column=2, padx=5, pady=5, sticky="w")
-        self.soundboard_monitor_volume_slider.bind("<ButtonRelease-1>", lambda e: self._on_soundboard_monitor_volume_released())
-        ToolTip(self.soundboard_monitor_volume_slider, "Controls the volume of only the soundboard audio played back to your local speakers/headphones.")
-        
-        mic_monitor_volume_label = ttk.Label(volume_frame, text="Local Mic Playback Monitor Volume:")
-        mic_monitor_volume_label.grid(row=2, column=0, padx=5, pady=5, sticky="w")
-        self.mic_monitor_volume_slider = ttk.Scale(volume_frame, from_=0, to=100, variable=self.mic_monitor_volume_var, command=self._on_mic_monitor_volume_changed)
-        self.mic_monitor_volume_slider.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
-        self._interactive_widgets.append(self.mic_monitor_volume_slider)
-        self.mic_monitor_volume_value_label = ttk.Label(volume_frame, text=f"{int(self.mic_monitor_volume_var.get())}%")
-        self.mic_monitor_volume_var.trace_add("write", lambda name, index, mode: self.mic_monitor_volume_value_label.config(text=f"{int(self.mic_monitor_volume_var.get())}%"))
-        self.mic_monitor_volume_value_label.grid(row=2, column=2, padx=5, pady=5, sticky="w")
-        self.mic_monitor_volume_slider.bind("<ButtonRelease-1>", self._on_mic_monitor_volume_released)
-        ToolTip(self.mic_monitor_volume_slider, "Controls the volume of ONLY your microphone's audio played back to your local speakers/headphones.")
-        
-        volume_frame.columnconfigure(1, weight=1)
-        
-        self._populate_device_dropdowns()
-
-    def _create_hotkeys_settings_widgets(self, parent_frame):
-        hotkey_frame = ttk.LabelFrame(parent_frame, text="Global Hotkey Assignments", padding=10)
-        hotkey_frame.pack(fill=X, pady=10)
-        self._interactive_widgets.append(hotkey_frame)
-        
-        stop_all_label = ttk.Label(hotkey_frame, text="Stop All Sounds:")
-        stop_all_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.stop_all_hotkey_display = ttk.Label(hotkey_frame, textvariable=self.stop_all_hotkey_var, bootstyle="info")
-        self.stop_all_hotkey_display.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        self.assign_stop_all_button = ttk.Button(hotkey_frame, text="Assign", command=lambda: self._assign_global_hotkey("stop_all"), bootstyle=self.assign_button_style_var.get())
-        self.assign_stop_all_button.grid(row=0, column=2, padx=5, pady=5)
-        self._interactive_widgets.append(self.assign_stop_all_button)
-        self.clear_stop_all_button = ttk.Button(hotkey_frame, text="Clear", command=lambda: self._clear_global_hotkey("stop_all"), bootstyle="secondary")
-        self.clear_stop_all_button.grid(row=0, column=3, padx=5, pady=5)
-        self._interactive_widgets.append(self.clear_stop_all_button)
-        ToolTip(self.assign_stop_all_button, "Click to assign a global hotkey to stop all playing sounds.")
-        ToolTip(self.clear_stop_all_button, "Clear the global hotkey for stopping all sounds.")
-        
-        toggle_mic_label = ttk.Label(hotkey_frame, text="Toggle Mic to Mixer:")
-        toggle_mic_label.grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        self.toggle_mic_hotkey_display = ttk.Label(hotkey_frame, textvariable=self.toggle_mic_to_mixer_hotkey_var, bootstyle="info")
-        self.toggle_mic_hotkey_display.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-        self.assign_toggle_mic_button = ttk.Button(hotkey_frame, text="Assign", command=lambda: self._assign_global_hotkey("toggle_mic_to_mixer"), bootstyle=self.assign_button_style_var.get())
-        self.assign_toggle_mic_button.grid(row=1, column=2, padx=5, pady=5)
-        self._interactive_widgets.append(self.assign_toggle_mic_button)
-        self.clear_toggle_mic_button = ttk.Button(hotkey_frame, text="Clear", command=lambda: self._clear_global_hotkey("toggle_mic_to_mixer"), bootstyle="secondary")
-        self.clear_toggle_mic_button.grid(row=1, column=3, padx=5, pady=5)
-        self._interactive_widgets.append(self.clear_toggle_mic_button)
-        ToolTip(self.assign_toggle_mic_button, "Click to assign a global hotkey to toggle including your microphone in the mix.")
-        ToolTip(self.clear_toggle_mic_button, "Clear the global hotkey for toggling mic in mix.")
-        
-        hotkey_frame.columnconfigure(1, weight=1)
-
-    def _create_general_settings_widgets(self, parent_frame):
-        general_frame = ttk.LabelFrame(parent_frame, text="General Settings", padding=10)
-        general_frame.pack(fill=X, pady=10)
-        self._interactive_widgets.append(general_frame)
-        
-        theme_label = ttk.Label(general_frame, text="Theme:")
-        theme_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.theme_combobox = ttk.Combobox(general_frame, textvariable=self.current_theme_var, values=self.style.theme_names(), state="readonly")
-        self.theme_combobox.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        self.theme_combobox.bind("<<ComboboxSelected>>", self._on_theme_changed)
-        ToolTip(self.theme_combobox, "Select the UI theme for the application.")
-        self._interactive_widgets.append(self.theme_combobox)
-        
-        single_sound_check = ttk.Checkbutton(general_frame, text="Single Sound Mode", variable=self.single_sound_mode_var, command=self._on_single_sound_mode_changed)
-        single_sound_check.grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky="w")
-        ToolTip(single_sound_check, "When enabled, only one sound can play at a time, stopping any currently playing sounds.")
-        self._interactive_widgets.append(single_sound_check)
-        
-        auto_start_mic_check = ttk.Checkbutton(general_frame, text="Auto-Start Mic in Mix", variable=self.auto_start_include_mic_in_mix_var, command=self._on_auto_start_mic_changed)
-        auto_start_mic_check.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky="w")
-        ToolTip(auto_start_mic_check, "When enabled, the microphone will automatically be included in the mix on app startup.")
-        self._interactive_widgets.append(auto_start_mic_check)
-        
-        general_frame.columnconfigure(1, weight=1)
-
-    def _create_about_widgets(self, parent_frame):
-        about_frame = ttk.LabelFrame(parent_frame, text="About WarpBoard", padding=10)
-        about_frame.pack(fill=BOTH, expand=True, pady=10)
-        self._interactive_widgets.append(about_frame)
-        
-        ttk.Label(about_frame, text="WarpBoard Soundboard", font=("Helvetica", 14, "bold")).pack(pady=5)
-        ttk.Label(about_frame, text="Version: 1.0.0").pack(pady=5)
-        ttk.Label(about_frame, text="A free and open-source soundboard application for Windows.").pack(pady=5)
-        ttk.Label(about_frame, text="Developed by: Your Name").pack(pady=5)
-        ttk.Label(about_frame, text="GitHub: github.com/yourusername/warpboard").pack(pady=5)
-        
-        vb_cable_button = ttk.Button(about_frame, text="Download VB-CABLE (Virtual Mic)", command=lambda: self._open_url(VB_CABLE_URL))
-        vb_cable_button.pack(pady=10)
-        ToolTip(vb_cable_button, "Download VB-CABLE, required for sending mixed audio to applications like Discord.")
-        self._interactive_widgets.append(vb_cable_button)
-
-    def _open_url(self, url):
-        import webbrowser
+        self.sounds, self.global_hotkeys, self.sound_data_cache = [], {}, {}
+        self.load_config()
+    def add_sound(self, file_path, custom_name=None):
         try:
-            webbrowser.open(url)
-            logging.info(f"Opened URL: {url}")
-        except Exception as e:
-            logging.error(f"Failed to open URL {url}: {e}")
-            messagebox.showerror("Error", f"Failed to open URL: {e}")
-
-    def _create_sound_card(self, sound):
-        sound_id = sound["id"]
-        sound_name = sound["name"]
-        sound_duration = sound.get("duration", 0)
-        sound_hotkey = sound.get("hotkeys", [])
-        
-        card = ttk.LabelFrame(self.inner_sound_grid_frame, text=sound_name[:MAX_DISPLAY_NAME_LENGTH], padding=5)
-        card.pack(fill=X, padx=5, pady=5)
-        self._interactive_widgets.append(card)
-        
-        select_var = tk.BooleanVar(value=sound_id in self.selected_sound_ids)
-        select_check = ttk.Checkbutton(card, variable=select_var, command=lambda: self._toggle_sound_selection(sound_id, select_var))
-        select_check.grid(row=0, column=0, rowspan=2, padx=5, pady=5, sticky="w")
-        ToolTip(select_check, "Select this sound for batch operations like removal or playback.")
-        self._interactive_widgets.append(select_check)
-        
-        play_button = ttk.Button(card, text="Play", command=lambda: self.play_sound(sound_id), bootstyle="success")
-        play_button.grid(row=0, column=1, padx=5, pady=2, sticky="ew")
-        ToolTip(play_button, "Play this sound.")
-        self._interactive_widgets.append(play_button)
-        
-        stop_button = ttk.Button(card, text="Stop", command=lambda: self.stop_sound(sound_id), bootstyle="danger")
-        stop_button.grid(row=1, column=1, padx=5, pady=2, sticky="ew")
-        ToolTip(stop_button, "Stop this sound.")
-        self._interactive_widgets.append(stop_button)
-        
-        loop_var = tk.BooleanVar(value=sound.get("loop", False))
-        sound["_loop_var_ui"] = loop_var
-        loop_check = ttk.Checkbutton(card, text="Loop", variable=loop_var, command=lambda: self._update_sound_loop(sound_id, loop_var.get()))
-        loop_check.grid(row=0, column=2, padx=5, pady=2, sticky="w")
-        ToolTip(loop_check, "Enable to loop this sound during playback.")
-        self._interactive_widgets.append(loop_check)
-        
-        volume_var = tk.DoubleVar(value=sound.get("volume", 1.0) * 100)
-        sound["_volume_var_ui"] = volume_var
-        volume_label = ttk.Label(card, text="Volume:")
-        volume_label.grid(row=0, column=3, padx=5, pady=2, sticky="w")
-        volume_scale = ttk.Scale(card, from_=0, to=100, variable=volume_var, command=lambda v: self._update_sound_volume(sound_id, float(v) / 100))
-        volume_scale.grid(row=0, column=4, padx=5, pady=2, sticky="ew")
-        self._interactive_widgets.append(volume_scale)
-        volume_value_label = ttk.Label(card, text=f"{int(volume_var.get())}%")
-        volume_var.trace_add("write", lambda name, index, mode: volume_value_label.config(text=f"{int(volume_var.get())}%"))
-        volume_value_label.grid(row=0, column=5, padx=5, pady=2, sticky="w")
-        ToolTip(volume_scale, "Adjust the volume for this sound.")
-        
-        hotkey_label_var = tk.StringVar(value=get_hotkey_display_string(sound_hotkey))
-        sound["_hotkey_label_var_ui"] = hotkey_label_var
-        hotkey_label = ttk.Label(card, text="Hotkey:")
-        hotkey_label.grid(row=1, column=2, padx=5, pady=2, sticky="w")
-        hotkey_display = ttk.Label(card, textvariable=hotkey_label_var, bootstyle="info")
-        hotkey_display.grid(row=1, column=3, padx=5, pady=2, sticky="ew")
-        ToolTip(hotkey_display, "The hotkey assigned to play this sound.")
-        
-        assign_hotkey_button = ttk.Button(card, text="Assign Hotkey", command=lambda: self._assign_sound_hotkey(sound_id, sound_name, hotkey_label_var), bootstyle=self.assign_button_style_var.get())
-        assign_hotkey_button.grid(row=1, column=4, padx=5, pady=2, sticky="ew")
-        self._interactive_widgets.append(assign_hotkey_button)
-        ToolTip(assign_hotkey_button, "Click to assign a hotkey to play this sound.")
-        
-        clear_hotkey_button = ttk.Button(card, text="Clear", command=lambda: self._clear_sound_hotkey(sound_id, hotkey_label_var), bootstyle="secondary")
-        clear_hotkey_button.grid(row=1, column=5, padx=5, pady=2, sticky="ew")
-        self._interactive_widgets.append(clear_hotkey_button)
-        ToolTip(clear_hotkey_button, "Clear the hotkey for this sound.")
-        
-        rename_button = ttk.Button(card, text="Rename", command=lambda: self._rename_sound(sound_id), bootstyle="info")
-        rename_button.grid(row=0, column=6, padx=5, pady=2, sticky="ew")
-        self._interactive_widgets.append(rename_button)
-        ToolTip(rename_button, "Rename this sound.")
-        
-        card.columnconfigure(3, weight=1)
-        card.columnconfigure(4, weight=1)
-
-    def _toggle_sound_selection(self, sound_id, select_var):
-        if select_var.get():
-            self.selected_sound_ids.add(sound_id)
-        else:
-            self.selected_sound_ids.discard(sound_id)
-        logging.debug(f"Sound {sound_id} {'selected' if select_var.get() else 'deselected'}")
-
-    def _update_sound_volume(self, sound_id, volume):
-        sound = next((s for s in self.sound_manager.sounds if s["id"] == sound_id), None)
-        if sound:
-            sound["volume"] = volume
-            self.sound_manager.save_config()
-            logging.debug(f"Updated volume for sound {sound_id} to {volume}")
-
-    def _update_sound_loop(self, sound_id, loop_status):
-        self.sound_manager.set_sound_loop(sound_id, loop_status)
-
-    def _rename_sound(self, sound_id):
-        sound = next((s for s in self.sound_manager.sounds if s["id"] == sound_id), None)
-        if not sound:
-            self.show_status_message("Sound not found for renaming.", bootstyle="danger")
-            return
-        
-        new_name = simpledialog.askstring("Rename Sound", "Enter new sound name:", initialvalue=sound["name"], parent=self)
-        if new_name:
-            try:
-                self.sound_manager.rename_sound(sound_id, new_name)
-                self.populate_sound_grid()
-                self.show_status_message(f"Renamed sound to '{new_name}'", bootstyle="success")
-            except Exception as e:
-                self.show_status_message(f"Failed to rename sound: {e}", bootstyle="danger")
-
-    def _clear_sound_hotkey(self, sound_id, hotkey_label_var):
+            sound_name = custom_name or os.path.splitext(os.path.basename(file_path))[0]
+            sound_name = re.sub(INVALID_FILENAME_CHARS, '_', sound_name)
+            output_path = os.path.join(SOUNDS_DIR, f"{sound_name}.wav")
+            counter = 1
+            while os.path.exists(output_path):
+                output_path = os.path.join(SOUNDS_DIR, f"{sound_name}_{counter}.wav")
+                counter += 1
+            audio = pydub.AudioSegment.from_file(file_path).set_frame_rate(SAMPLE_RATE).set_channels(CHANNELS)
+            audio.export(output_path, format="wav")
+            new_sound = {"id": str(uuid.uuid4()), "name": sound_name, "path": output_path, "volume": 1.0, "hotkeys": [], "loop": False, "enabled": True, "duration": sf.info(output_path).duration}
+            self.sounds.append(new_sound)
+            self.preload_sound_data(new_sound)
+            self.save_config()
+            return new_sound
+        except Exception as e: logging.error(f"Failed to add sound {file_path}: {e}"); raise
+    def rename_sound(self, sound_id, new_name):
+        sound = self.get_sound_by_id(sound_id)
+        if not sound: return None
+        new_name_clean = re.sub(INVALID_FILENAME_CHARS, '_', new_name.strip())
+        if not new_name_clean or any(s['name'] == new_name_clean for s in self.sounds if s['id'] != sound_id):
+            raise ValueError("New name is invalid or already exists.")
+        old_path, new_path = sound['path'], os.path.join(SOUNDS_DIR, f"{new_name_clean}.wav")
+        if os.path.exists(new_path) and old_path != new_path: raise ValueError("A file with the new name already exists.")
         try:
-            self.sound_manager.update_sound_hotkeys(sound_id, [])
-            hotkey_label_var.set("Not Assigned")
-            self.keybind_manager.update_hotkeys()
-            sound = next((s for s in self.sound_manager.sounds if s["id"] == sound_id), None)
+            os.rename(old_path, new_path)
+            sound['name'], sound['path'] = new_name_clean, new_path
+            self.save_config()
+            return sound
+        except OSError as e:
+            logging.error(f"Failed to rename file from {old_path} to {new_path}: {e}")
+            raise ValueError(f"Could not rename the sound file. Is it in use?")
+
+    def remove_sounds(self, sound_ids):
+        for sound_id in list(sound_ids):
+            sound = self.get_sound_by_id(sound_id)
             if sound:
-                self.show_status_message(f"Cleared hotkey for '{sound['name']}'", bootstyle="success")
-            else:
-                self.show_status_message("Sound not found.", bootstyle="danger")
-        except Exception as e:
-            logging.error(f"Failed to clear hotkey for sound {sound_id}: {e}", exc_info=True)
-            messagebox.showerror("Error", f"Failed to clear hotkey: {e}")
-
-    def _clear_global_hotkey(self, action):
+                try:
+                    if os.path.exists(sound["path"]): os.remove(sound["path"])
+                    if sound_id in self.sound_data_cache: del self.sound_data_cache[sound_id]
+                    self.sounds.remove(sound)
+                except Exception as e: logging.error(f"Error removing sound {sound['name']}: {e}")
+        self.save_config()
+    def get_sound_by_id(self, sound_id): return next((s for s in self.sounds if s["id"] == sound_id), None)
+    def update_sound_property(self, sound_id, key, value):
+        sound = self.get_sound_by_id(sound_id)
+        if sound: sound[key] = value
+    def set_global_hotkey(self, action, hotkey_list):
+        self.global_hotkeys[action] = hotkey_list; self.save_config()
+    def get_all_assigned_hotkeys(self):
+        hotkeys = set()
+        for sound in self.sounds:
+            if sound.get("hotkeys"): hotkeys.add(tuple(sorted(sound["hotkeys"])))
+        for hotkey_list in self.global_hotkeys.values():
+            if hotkey_list: hotkeys.add(tuple(sorted(hotkey_list)))
+        return hotkeys
+    def save_config(self):
         try:
-            self.sound_manager.set_global_hotkey(action, [])
-            hotkey_var = self.stop_all_hotkey_var if action == "stop_all" else self.toggle_mic_to_mixer_hotkey_var
-            hotkey_var.set("Not Assigned")
-            self.keybind_manager.update_hotkeys()
-            self.show_status_message(f"Cleared global hotkey for '{action}'", bootstyle="success")
-        except Exception as e:
-            logging.error(f"Failed to clear global hotkey for {action}: {e}", exc_info=True)
-            messagebox.showerror("Error", f"Failed to clear hotkey: {e}")
-
-    def _assign_sound_hotkey(self, sound_id, sound_name, hotkey_label_var):
-        def on_hotkey_recorded(hotkey_list_strings):
-            try:
-                if not hotkey_list_strings:
-                    self.show_status_message(f"Hotkey assignment for '{sound_name}' cancelled.", bootstyle="info")
-                    hotkey_label_var.set("Not Assigned")
-                    self.keybind_manager.update_hotkeys()
-                    return
-
-                all_hotkeys = self.sound_manager.get_all_assigned_hotkeys()
-                if tuple(sorted(hotkey_list_strings)) in all_hotkeys:
-                    self.show_status_message(f"Hotkey '{get_hotkey_display_string(hotkey_list_strings)}' is already assigned.", bootstyle="warning")
-                    hotkey_label_var.set(get_hotkey_display_string(self.sound_manager.sounds[sound_id]["hotkeys"]))
-                    return
-
-                hotkey_obj = Hotkey.from_json_serializable(hotkey_list_strings)
-                self.sound_manager.update_sound_hotkeys(sound_id, hotkey_obj.to_json_serializable())
-                hotkey_label_var.set(str(hotkey_obj))
-                self.keybind_manager.update_hotkeys()
-                self.show_status_message(f"Hotkey assigned to '{sound_name}': {str(hotkey_obj)}", bootstyle="success")
-            except Exception as e:
-                logging.error(f"Failed to assign hotkey for sound {sound_name}: {e}", exc_info=True)
-                messagebox.showerror("Error", f"Failed to assign hotkey: {e}")
-
-        self.key_assignment_in_progress_var.set(True)
-        self.keybind_manager.set_hotkey_assignment_target(sound_id)
-        self._update_assign_button_styles()
-        self.disable_ui_for_hotkey_assignment()
-        HotkeyRecorder(self, sound_name, hotkey_label_var, lambda combo: [on_hotkey_recorded(combo), self.enable_ui_after_hotkey_assignment(), self.key_assignment_in_progress_var.set(False), self.keybind_manager.set_hotkey_assignment_target(None), self._update_assign_button_styles()])
-
-    def _assign_global_hotkey(self, action):
-        def on_hotkey_recorded(hotkey_list_strings):
-            try:
-                if not hotkey_list_strings:
-                    self.show_status_message(f"Hotkey assignment for '{action}' cancelled.", bootstyle="info")
-                    hotkey_var = self.stop_all_hotkey_var if action == "stop_all" else self.toggle_mic_to_mixer_hotkey_var
-                    hotkey_var.set("Not Assigned")
-                    self.keybind_manager.update_hotkeys()
-                    return
-
-                all_hotkeys = self.sound_manager.get_all_assigned_hotkeys()
-                if tuple(sorted(hotkey_list_strings)) in all_hotkeys:
-                    self.show_status_message(f"Hotkey '{get_hotkey_display_string(hotkey_list_strings)}' is already assigned.", bootstyle="warning")
-                    hotkey_var = self.stop_all_hotkey_var if action == "stop_all" else self.toggle_mic_to_mixer_hotkey_var
-                    hotkey_var.set(get_hotkey_display_string(self.sound_manager.global_hotkeys.get(action, [])))
-                    return
-
-                hotkey_obj = Hotkey.from_json_serializable(hotkey_list_strings)
-                self.sound_manager.set_global_hotkey(action, hotkey_obj.to_json_serializable())
-                hotkey_var = self.stop_all_hotkey_var if action == "stop_all" else self.toggle_mic_to_mixer_hotkey_var
-                hotkey_var.set(str(hotkey_obj))
-                self.keybind_manager.update_hotkeys()
-                self.show_status_message(f"Global hotkey assigned for '{action}': {str(hotkey_obj)}", bootstyle="success")
-            except Exception as e:
-                logging.error(f"Failed to assign global hotkey for {action}: {e}", exc_info=True)
-                messagebox.showerror("Error", f"Failed to assign hotkey: {e}")
-
-        self.key_assignment_in_progress_var.set(True)
-        self.keybind_manager.set_hotkey_assignment_target(action)
-        self._update_assign_button_styles()
-        self.disable_ui_for_hotkey_assignment()
-        hotkey_var = self.stop_all_hotkey_var if action == "stop_all" else self.toggle_mic_to_mixer_hotkey_var
-        HotkeyRecorder(self, action, hotkey_var, lambda combo: [on_hotkey_recorded(combo), self.enable_ui_after_hotkey_assignment(), self.key_assignment_in_progress_var.set(False), self.keybind_manager.set_hotkey_assignment_target(None), self._update_assign_button_styles()])
-
-    def _update_assign_button_styles(self):
-        if self.key_assignment_in_progress_var.get():
-            self.assign_button_style_var.set("warning")
-            for widget in self._interactive_widgets:
-                if isinstance(widget, ttk.Button) and widget.cget("text") in ["Assign", "Assign Hotkey"]:
-                    widget.configure(text="Press Keys...", bootstyle="warning")
-        else:
-            self.assign_button_style_var.set("primary")
-            for widget in self._interactive_widgets:
-                if isinstance(widget, ttk.Button) and widget.cget("text") == "Press Keys...":
-                    original_text = "Assign" if widget in [self.assign_stop_all_button, self.assign_toggle_mic_button] else "Assign Hotkey"
-                    widget.configure(text=original_text, bootstyle="primary")
-
-    def disable_ui_for_hotkey_assignment(self):
-        for widget in self._interactive_widgets:
-            if isinstance(widget, (ttk.Button, ttk.Checkbutton, ttk.Combobox, ttk.Scale)):
-                widget.configure(state="disabled")
-
-    def enable_ui_after_hotkey_assignment(self):
-        for widget in self._interactive_widgets:
-            if isinstance(widget, (ttk.Button, ttk.Checkbutton, ttk.Combobox, ttk.Scale)):
-                widget.configure(state="normal")
-
-    def _populate_device_dropdowns(self):
-        if not self.audio_manager.output_devices:
-            self.show_status_message("No output devices detected.", bootstyle="danger")
-        else:
-            output_names = [dev["name"][:MAX_DEVICE_NAME_LENGTH] for dev in self.audio_manager.output_devices]
-            self.output_device_combobox["values"] = output_names
-            current_output_name = self.audio_manager.get_pyaudio_device_name_by_index(self.audio_manager.current_output_device_id_pyaudio)
-            if current_output_name in output_names:
-                self.output_device_combobox.set(current_output_name[:MAX_DEVICE_NAME_LENGTH])
-            else:
-                self.output_device_combobox.set(output_names[0] if output_names else "None")
-
-        if not self.audio_manager.input_devices:
-            self.show_status_message("No input devices detected.", bootstyle="danger")
-        else:
-            input_names = [dev["name"][:MAX_DEVICE_NAME_LENGTH] for dev in self.audio_manager.input_devices]
-            self.input_device_combobox["values"] = input_names
-            current_input_name = self.audio_manager.get_pyaudio_device_name_by_index(self.audio_manager.current_input_device_id_pyaudio)
-            if current_input_name in input_names:
-                self.input_device_combobox.set(current_input_name[:MAX_DEVICE_NAME_LENGTH])
-            else:
-                self.input_device_combobox.set(input_names[0] if input_names else "None")
-
-        monitor_names = [dev["name"][:MAX_DEVICE_NAME_LENGTH] for dev in self.audio_manager.output_devices]
-        self.soundboard_monitor_device_combobox["values"] = monitor_names
-        self.mic_monitor_device_combobox["values"] = monitor_names
-        soundboard_monitor_name = self.audio_manager.get_pyaudio_device_name_by_index(self.audio_manager.current_soundboard_monitor_device_id_pyaudio)
-        mic_monitor_name = self.audio_manager.get_pyaudio_device_name_by_index(self.audio_manager.current_mic_monitor_device_id_pyaudio)
-        if soundboard_monitor_name in monitor_names:
-            self.soundboard_monitor_device_combobox.set(soundboard_monitor_name[:MAX_DEVICE_NAME_LENGTH])
-        else:
-            self.soundboard_monitor_device_combobox.set(monitor_names[0] if monitor_names else "None")
-        if mic_monitor_name in monitor_names:
-            self.mic_monitor_device_combobox.set(mic_monitor_name[:MAX_DEVICE_NAME_LENGTH])
-        else:
-            self.mic_monitor_device_combobox.set(monitor_names[0] if monitor_names else "None")
-
-    def _on_output_device_selected(self, event):
-        selected_name = self.output_device_combobox.get()
-        for dev in self.audio_manager.output_devices:
-            if dev["name"].startswith(selected_name):
-                self.audio_manager.current_output_device_id_pyaudio = dev["index"]
-                self.audio_manager.restart_audio_streams()
-                self.show_status_message(f"Main output device set to: {selected_name}", bootstyle="success")
-                self._save_settings()
-                break
-
-    def _on_input_device_selected(self, event):
-        selected_name = self.input_device_combobox.get()
-        for dev in self.audio_manager.input_devices:
-            if dev["name"].startswith(selected_name):
-                self.audio_manager.current_input_device_id_pyaudio = dev["index"]
-                self.audio_manager.restart_audio_streams()
-                self.show_status_message(f"Input device set to: {selected_name}", bootstyle="success")
-                self._save_settings()
-                break
-
-    def _on_soundboard_monitor_device_selected(self, event):
-        selected_name = self.soundboard_monitor_device_combobox.get()
-        for dev in self.audio_manager.output_devices:
-            if dev["name"].startswith(selected_name):
-                self.audio_manager.current_soundboard_monitor_device_id_pyaudio = dev["index"]
-                self.audio_manager.restart_audio_streams()
-                self.show_status_message(f"Soundboard monitor device set to: {selected_name}", bootstyle="success")
-                self._save_settings()
-                break
-
-    def _on_mic_monitor_device_selected(self, event):
-        selected_name = self.mic_monitor_device_combobox.get()
-        for dev in self.audio_manager.output_devices:
-            if dev["name"].startswith(selected_name):
-                self.audio_manager.current_mic_monitor_device_id_pyaudio = dev["index"]
-                self.audio_manager.restart_audio_streams()
-                self.show_status_message(f"Mic monitor device set to: {selected_name}", bootstyle="success")
-                self._save_settings()
-                break
-
-    def _on_master_volume_changed(self, value):
-        self.audio_manager.master_volume = float(value) / 100.0
-        self._save_settings()
-
-    def _on_master_volume_released(self, event):
-        self.show_status_message(f"Master volume set to {int(self.master_volume_var.get())}%", bootstyle="info")
-
-    def _on_soundboard_monitor_volume_changed(self, value):
-        self.audio_manager.soundboard_monitor_volume = float(value) / 100.0
-        self._save_settings()
-
-    def _on_soundboard_monitor_volume_released(self):
-        self.show_status_message(f"Soundboard monitor volume set to {int(self.soundboard_monitor_volume_var.get())}%", bootstyle="info")
-
-    def _on_mic_monitor_volume_changed(self, value):
-        self.audio_manager.mic_monitor_volume = float(value) / 100.0
-        self._save_settings()
-
-    def _on_mic_monitor_volume_released(self, event):
-        self.show_status_message(f"Mic monitor volume set to {int(self.mic_monitor_volume_var.get())}%", bootstyle="info")
-
-    def _on_single_sound_mode_changed(self):
-        self.audio_manager.mixer.set_single_sound_mode(self.single_sound_mode_var.get())
-        self._save_settings()
-        self.show_status_message(f"Single sound mode {'enabled' if self.single_sound_mode_var.get() else 'disabled'}", bootstyle="info")
-
-    def _on_auto_start_mic_changed(self):
-        self._save_settings()
-        self.show_status_message(f"Auto-start mic in mix {'enabled' if self.auto_start_include_mic_in_mix_var.get() else 'disabled'}", bootstyle="info")
-
-    def _on_theme_changed(self, event):
+            with open(CONFIG_FILE, 'w') as f: json.dump({"sounds": self.sounds, "global_hotkeys": self.global_hotkeys}, f, indent=4)
+        except IOError as e: logging.error(f"Error saving soundboard config: {e}")
+    def load_config(self):
+        if not os.path.exists(CONFIG_FILE): return
         try:
-            self.style.theme_use(self.current_theme_var.get())
-            self._save_settings()
-            self.show_status_message(f"Theme changed to {self.current_theme_var.get()}", bootstyle="success")
-        except Exception as e:
-            logging.error(f"Failed to change theme: {e}")
-            self.show_status_message(f"Failed to change theme: {e}", bootstyle="danger")
-
-    def _save_settings(self):
-        settings = {
-            "theme": self.current_theme_var.get(),
-            "single_sound_mode": self.single_sound_mode_var.get(),
-            "auto_start_include_mic_in_mix": self.auto_start_include_mic_in_mix_var.get(),
-            "master_volume": self.master_volume_var.get(),
-            "soundboard_monitor_volume": self.soundboard_monitor_volume_var.get(),
-            "mic_monitor_volume": self.mic_monitor_volume_var.get(),
-            "output_device_id": self.audio_manager.current_output_device_id_pyaudio,
-            "input_device_id": self.audio_manager.current_input_device_id_pyaudio,
-            "soundboard_monitor_device_id": self.audio_manager.current_soundboard_monitor_device_id_pyaudio,
-            "mic_monitor_device_id": self.audio_manager.current_mic_monitor_device_id_pyaudio,
-            "include_mic_in_mix": self.include_mic_in_mix_var.get(),
-            "soundboard_monitor_enabled": self.soundboard_monitor_enabled_var.get(),
-            "mic_monitor_enabled": self.mic_monitor_enabled_var.get(),
-        }
-        self.app_settings_manager.save_settings(settings)
-
-    def _apply_settings_to_ui(self):
-        settings = self.app_settings_manager.get_settings()
-        
-        self.current_theme_var.set(settings.get("theme", "litera"))
-        try:
-            self.style.theme_use(self.current_theme_var.get())
-        except Exception as e:
-            logging.warning(f"Failed to apply theme {self.current_theme_var.get()}: {e}")
-        
-        self.single_sound_mode_var.set(settings.get("single_sound_mode", False))
-        self.audio_manager.mixer.set_single_sound_mode(self.single_sound_mode_var.get())
-        
-        self.auto_start_include_mic_in_mix_var.set(settings.get("auto_start_include_mic_in_mix", False))
-        self.include_mic_in_mix_var.set(settings.get("include_mic_in_mix", False))
-        self.soundboard_monitor_enabled_var.set(settings.get("soundboard_monitor_enabled", True))
-        self.mic_monitor_enabled_var.set(settings.get("mic_monitor_enabled", False))
-        
-        self.master_volume_var.set(settings.get("master_volume", 100.0))
-        self.soundboard_monitor_volume_var.set(settings.get("soundboard_monitor_volume", 100.0))
-        self.mic_monitor_volume_var.set(settings.get("mic_monitor_volume", 100.0))
-        
-        self.audio_manager.master_volume = self.master_volume_var.get() / 100.0
-        self.audio_manager.soundboard_monitor_volume = self.soundboard_monitor_volume_var.get() / 100.0
-        self.audio_manager.mic_monitor_volume = self.mic_monitor_volume_var.get() / 100.0
-        
-        output_device_id = settings.get("output_device_id")
-        if output_device_id is not None:
-            self.audio_manager.current_output_device_id_pyaudio = output_device_id
-        input_device_id = settings.get("input_device_id")
-        if input_device_id is not None:
-            self.audio_manager.current_input_device_id_pyaudio = input_device_id
-        soundboard_monitor_device_id = settings.get("soundboard_monitor_device_id")
-        if soundboard_monitor_device_id is not None:
-            self.audio_manager.current_soundboard_monitor_device_id_pyaudio = soundboard_monitor_device_id
-        mic_monitor_device_id = settings.get("mic_monitor_device_id")
-        if mic_monitor_device_id is not None:
-            self.audio_manager.current_mic_monitor_device_id_pyaudio = mic_monitor_device_id
-        
-        self.audio_manager.start_main_audio_output_stream()
-        if self.auto_start_include_mic_in_mix_var.get():
-            self.include_mic_in_mix_var.set(True)
-            self.audio_manager.start_mic_input_stream()
-        if self.soundboard_monitor_enabled_var.get():
-            self.audio_manager.start_soundboard_monitor_stream()
-        if self.mic_monitor_enabled_var.get():
-            self.audio_manager.start_mic_monitor_stream()
-        
-        self._populate_device_dropdowns()
-        
-        if self.audio_manager.virtual_mic_device_id is None:
-            self.show_status_message("VB-CABLE not detected. Install it for proper virtual mic functionality.", bootstyle="warning")
-        
-        self.stop_all_hotkey_var.set(get_hotkey_display_string(self.sound_manager.global_hotkeys.get("stop_all", [])))
-        self.toggle_mic_to_mixer_hotkey_var.set(get_hotkey_display_string(self.sound_manager.global_hotkeys.get("toggle_mic_to_mixer", [])))
-
-    def populate_sound_grid(self):
-        for widget in self.inner_sound_grid_frame.winfo_children():
-            widget.destroy()
-        self._interactive_widgets = [w for w in self._interactive_widgets if not isinstance(w, ttk.LabelFrame) or w.winfo_parent() != str(self.inner_sound_grid_frame)]
-        
-        for sound in self.sound_manager.sounds:
-            self._create_sound_card(sound)
-        
-        self.sound_grid_canvas.configure(scrollregion=self.sound_grid_canvas.bbox("all"))
-
-    def add_sound(self):
-        file_paths = filedialog.askopenfilenames(filetypes=SUPPORTED_FORMATS)
-        if not file_paths:
-            return
-        
-        for file_path in file_paths:
-            custom_name = simpledialog.askstring("Sound Name", f"Enter name for sound '{os.path.basename(file_path)}':", parent=self)
-            try:
-                sound = self.sound_manager.add_sound(file_path, custom_name)
-                self._create_sound_card(sound)
-                self.show_status_message(f"Added sound: {sound['name']}", bootstyle="success")
-            except Exception as e:
-                self.show_status_message(f"Failed to add sound: {e}", bootstyle="danger")
-        
-        self.sound_grid_canvas.configure(scrollregion=self.sound_grid_canvas.bbox("all"))
-
-    def remove_selected_sounds(self):
-        if not self.selected_sound_ids:
-            self.show_status_message("No sounds selected for removal.", bootstyle="warning")
-            return
-        
-        if messagebox.askyesno("Confirm Removal", "Are you sure you want to remove the selected sounds?"):
-            try:
-                self.sound_manager.remove_sounds(self.selected_sound_ids)
-                self.selected_sound_ids.clear()
-                self.populate_sound_grid()
-                self.keybind_manager.update_hotkeys()
-                self.show_status_message("Selected sounds removed.", bootstyle="success")
-            except Exception as e:
-                self.show_status_message(f"Failed to remove sounds: {e}", bootstyle="danger")
-
-    def play_sound(self, sound_id):
-        sound = next((s for s in self.sound_manager.sounds if s["id"] == sound_id), None)
-        if not sound:
-            self.show_status_message("Sound not found.", bootstyle="danger")
-            return
-        
+            with open(CONFIG_FILE, 'r') as f: data = json.load(f)
+            self.sounds = [s for s in data.get("sounds", []) if s.get("path") and os.path.exists(s.get("path"))]
+            self.global_hotkeys = data.get("global_hotkeys", {})
+            for sound in self.sounds:
+                if 'enabled' not in sound: sound['enabled'] = True
+                self.preload_sound_data(sound)
+        except (json.JSONDecodeError, KeyError) as e: logging.error(f"Error loading config: {e}")
+    def preload_sound_data(self, sound):
         try:
             data, _ = sf.read(sound["path"], dtype='float32')
-            if len(data.shape) == 1:
-                data = np.column_stack((data, data))
-            
-            self.audio_manager.mixer.add_sound(data, sound["volume"], sound["loop"], sound["id"], sound["name"])
-            self.show_status_message(f"Playing sound: {sound['name']}", bootstyle="success")
+            if len(data.shape) == 1: data = np.column_stack((data, data))
+            self.sound_data_cache[sound["id"]] = data
         except Exception as e:
-            logging.error(f"Failed to play sound {sound['name']}: {e}", exc_info=True)
-            self.show_status_message(f"Failed to play sound: {e}", bootstyle="danger")
+            logging.error(f"Failed to pre-load audio for '{sound['name']}': {e}")
+            if sound["id"] in self.sound_data_cache: del self.sound_data_cache[sound["id"]]
 
-    def play_selected_sound(self):
-        if len(self.selected_sound_ids) != 1:
-            self.show_status_message("Select exactly one sound to play.", bootstyle="warning")
-            return
-        sound_id = next(iter(self.selected_sound_ids))
-        self.play_sound(sound_id)
+class AudioOutputManager:
+    def __init__(self, app):
+        self.app, self.p, self.mixer = app, pyaudio.PyAudio(), MixingBuffer()
+        self.output_devices, self.input_devices = self._enumerate_devices()
+        self.virtual_mic_device_id = self._find_virtual_mic()
+        self.main_stream, self.mic_stream, self.soundboard_monitor_stream, self.mic_monitor_stream = None, None, None, None
+        self._mic_buffer, self._mic_buffer_lock = deque(maxlen=int(SAMPLE_RATE / FRAME_SIZE * 2)), Lock()
+        self._soundboard_monitor_buffer, self._soundboard_monitor_buffer_lock = deque(maxlen=int(SAMPLE_RATE / FRAME_SIZE * 2)), Lock()
+        self._mic_reader_thread, self._mic_reader_stop_event = None, Event()
+        self.mic_inclusion_event = Event()
+        self.master_volume = 1.0
+        self.sb_monitor_volume = 0.75
+        self.mic_monitor_volume = 0.75
+
+    def set_master_volume(self, volume): self.master_volume = volume
+    def set_sb_monitor_volume(self, volume): self.sb_monitor_volume = volume
+    def set_mic_monitor_volume(self, volume): self.mic_monitor_volume = volume
+
+    def _enumerate_devices(self):
+        output, input_devs = [], []
+        for i in range(self.p.get_device_count()):
+            dev = self.p.get_device_info_by_index(i)
+            try:
+                if dev.get('maxOutputChannels', 0) >= CHANNELS:
+                    if self.p.is_format_supported(SAMPLE_RATE,
+                                                  output_device=i,
+                                                  output_channels=CHANNELS,
+                                                  output_format=pyaudio.paFloat32):
+                        output.append({"name": dev['name'], "index": i})
+
+                if dev.get('maxInputChannels', 0) >= CHANNELS:
+                    if self.p.is_format_supported(SAMPLE_RATE,
+                                                 input_device=i,
+                                                 input_channels=CHANNELS,
+                                                 input_format=pyaudio.paFloat32):
+                        input_devs.append({"name": dev['name'], "index": i})
+            except ValueError:
+                logging.warning(f"Device check failed for {dev.get('name')}. It may not be a standard audio device. Skipping.")
+                continue
+        return output, input_devs
+        
+    def _find_virtual_mic(self):
+        for dev in self.output_devices:
+            if VIRTUAL_MIC_NAME_PARTIAL.lower() in dev['name'].lower():
+                logging.info(f"Virtual Mic found: {dev['name']} at index {dev['index']}")
+                return dev['index']
+        logging.warning("VB-CABLE input not found."); return None
+    def get_device_name_by_index(self, index):
+        if index is None: return "None"
+        try: return self.p.get_device_info_by_index(index)['name']
+        except (OSError, IndexError): return "Invalid Device"
+
+    def _stream_callback(self, in_data, frame_count, time_info, status):
+        mixed_audio, playing_names = self.mixer.mix_audio(frame_count)
+        is_mic_on = self.mic_inclusion_event.is_set()
+        with current_playing_sound_details_lock:
+            current_playing_sound_details["names"] = playing_names
+            current_playing_sound_details["active"] = bool(playing_names) or is_mic_on
+        with self._soundboard_monitor_buffer_lock: self._soundboard_monitor_buffer.append(mixed_audio.copy())
+        if is_mic_on:
+            mixed_audio += self._get_mic_data_from_buffer(frame_count)
+            np.clip(mixed_audio, -1.0, 1.0, out=mixed_audio)
+        
+        mixed_audio *= self.master_volume
+        return (mixed_audio.astype(np.float32).tobytes(), pyaudio.paContinue)
+        
+    def _soundboard_monitor_callback(self, in_data, frame_count, time_info, status):
+        data = np.zeros((frame_count, CHANNELS), dtype=np.float32)
+        with self._soundboard_monitor_buffer_lock:
+            if self._soundboard_monitor_buffer: data = self._soundboard_monitor_buffer.popleft()
+        
+        return ((data * self.sb_monitor_volume).astype(np.float32).tobytes(), pyaudio.paContinue)
+    def _mic_monitor_callback(self, in_data, frame_count, time_info, status):
+        data = self._get_mic_data_from_buffer(frame_count)
+        return ((data * self.mic_monitor_volume).astype(np.float32).tobytes(), pyaudio.paContinue)
+
+    def _start_stream(self, stream_attr, device_id, is_input, callback):
+        self._stop_stream(stream_attr)
+        if device_id is None: return
+        try:
+            stream = self.p.open(format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE, output=not is_input, input=is_input, frames_per_buffer=FRAME_SIZE, output_device_index=None if is_input else device_id, input_device_index=device_id if is_input else None, stream_callback=callback)
+            setattr(self, stream_attr, stream)
+            logging.info(f"{stream_attr} started on device index {device_id}")
+        except Exception as e:
+            logging.error(f"Failed to start {stream_attr} on device {device_id}: {e}")
+            error_msg = f"Failed to start audio on '{self.get_device_name_by_index(device_id)}'."
+            if isinstance(e, OSError):
+                if e.errno == -9997: error_msg += "\nError: Invalid sample rate. Please ensure the device supports 44100 Hz."
+                elif e.errno == -9999: error_msg += "\nError: Device may be in use by another application or disconnected."
+                else: error_msg += f"\nOS Error: {e.strerror}"
+            else: error_msg += f"\nDetails: {e}"
+            messagebox.showerror("Audio Error", error_msg, parent=self.app)
+            self.app.show_status_message(f"Failed to start audio on device {device_id}", "danger")
+    
+    def _stop_stream(self, stream_attr):
+        stream = getattr(self, stream_attr)
+        if stream:
+            try:
+                if stream.is_active(): stream.stop_stream()
+                stream.close()
+            except OSError as e:
+                logging.warning(f"OSError stopping stream {stream_attr}: {e}")
+            finally:
+                setattr(self, stream_attr, None)
+                logging.info(f"{stream_attr} stopped.")
+
+    def start_main_stream(self): self._start_stream('main_stream', self.app.app_settings.get_setting("output_device_id", self.virtual_mic_device_id), False, self._stream_callback)
+    def stop_main_stream(self): self._stop_stream('main_stream')
+    def start_soundboard_monitor_stream(self): self._start_stream('soundboard_monitor_stream', self.app.app_settings.get_setting("soundboard_monitor_device_id"), False, self._soundboard_monitor_callback)
+    def stop_soundboard_monitor_stream(self): self._stop_stream('soundboard_monitor_stream')
+    def start_mic_monitor_stream(self): self._start_stream('mic_monitor_stream', self.app.app_settings.get_setting("mic_monitor_device_id"), False, self._mic_monitor_callback)
+    def stop_mic_monitor_stream(self): self._stop_stream('mic_monitor_stream')
+
+    def _mic_reader_thread_func(self):
+        while not self._mic_reader_stop_event.is_set():
+            try:
+                if self.mic_stream and self.mic_stream.is_active():
+                    raw_data = self.mic_stream.read(FRAME_SIZE, exception_on_overflow=False)
+                    with self._mic_buffer_lock:
+                        self._mic_buffer.append(np.frombuffer(raw_data, dtype=np.float32).reshape(-1, CHANNELS))
+                else: time.sleep(0.01)
+            except Exception as e: logging.error(f"Error in mic reader thread: {e}"); break
+        logging.info("Mic reader thread stopped.")
+    def start_mic_input(self):
+        self.stop_mic_input()
+        device_id = self.app.app_settings.get_setting("input_device_id")
+        if device_id is None: return
+        try:
+            self.mic_stream = self.p.open(format=pyaudio.paFloat32, channels=CHANNELS, rate=SAMPLE_RATE, input=True, frames_per_buffer=FRAME_SIZE, input_device_index=device_id)
+            self._mic_reader_stop_event.clear()
+            self._mic_reader_thread = threading.Thread(target=self._mic_reader_thread_func, daemon=True)
+            self._mic_reader_thread.start()
+        except Exception as e: logging.error(f"Failed to start mic input: {e}")
+    def stop_mic_input(self):
+        self._mic_reader_stop_event.set()
+        if self._mic_reader_thread: self._mic_reader_thread.join(timeout=0.5)
+        self._stop_stream('mic_stream')
+        with self._mic_buffer_lock: self._mic_buffer.clear()
+    def _get_mic_data_from_buffer(self, frame_count):
+        with self._mic_buffer_lock:
+            if self._mic_buffer: return self._mic_buffer.popleft()
+        return np.zeros((frame_count, CHANNELS), dtype=np.float32)
+    def close(self):
+        self.stop_mic_input(); self.stop_main_stream(); self.stop_soundboard_monitor_stream(); self.stop_mic_monitor_stream()
+        self.p.terminate(); logging.info("PyAudio terminated.")
+
+class KeybindManager:
+    def __init__(self, app):
+        self.app, self.hotkey_registry, self.active_keys = app, {}, set()
+        self.listener, self.mouse_listener = None, None
+    def update_hotkeys(self):
+        self.stop(); self.hotkey_registry.clear()
+        for sound in self.app.sound_manager.sounds:
+            if sound.get("hotkeys") and sound.get("enabled", True):
+                self.hotkey_registry[tuple(sorted(sound["hotkeys"]))] = lambda s_id=sound["id"]: self.app.play_sound(s_id)
+        global_hotkeys = self.app.sound_manager.global_hotkeys
+        if global_hotkeys.get("stop_all"): self.hotkey_registry[tuple(sorted(global_hotkeys["stop_all"]))] = self.app.stop_all_sounds
+        if global_hotkeys.get("toggle_mic_to_mixer"): self.hotkey_registry[tuple(sorted(global_hotkeys["toggle_mic_to_mixer"]))] = self.app.toggle_mic_to_mixer_from_hotkey
+        if self.hotkey_registry: self.start(); logging.info(f"KeybindManager started with {len(self.hotkey_registry)} hotkeys.")
+    def _on_press(self, key):
+        key_str = get_pynput_key_string(key)
+        if key_str: self.active_keys.add(key_str); self.check_hotkeys()
+    def _on_release(self, key):
+        key_str = get_pynput_key_string(key)
+        if key_str in self.active_keys: self.active_keys.remove(key_str)
+    def _on_click(self, x, y, button, pressed):
+        if pressed and button not in [mouse.Button.left, mouse.Button.right]:
+            key_str = get_pynput_key_string(button)
+            if key_str:
+                hotkey_tuple = tuple(sorted(self.active_keys | {key_str}))
+                if hotkey_tuple in self.hotkey_registry: self.hotkey_registry[hotkey_tuple]()
+    def check_hotkeys(self):
+        current_keys_tuple = tuple(sorted(self.active_keys))
+        if current_keys_tuple in self.hotkey_registry: self.hotkey_registry[current_keys_tuple]()
+    def start(self):
+        if not (self.listener and self.listener.is_alive()):
+            self.listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
+            self.listener.start()
+        if not (self.mouse_listener and self.mouse_listener.is_alive()):
+            self.mouse_listener = mouse.Listener(on_click=self._on_click)
+            self.mouse_listener.start()
+    def stop(self):
+        if self.listener: self.listener.stop()
+        if self.mouse_listener: self.mouse_listener.stop()
+        self.active_keys.clear()
+
+
+# --- Main Application ---
+class SoundboardApp(ttk.Window):
+    """The main application class for the soundboard."""
+    def __init__(self):
+        self.app_settings = AppSettingsManager()
+        themename = self.app_settings.get_setting("theme", "vapor")
+        super().__init__(title="WarpBoard", themename=themename, minsize=(700, 500))
+        self.geometry("950x700")
+        center_window(self)
+
+        self.sound_manager = SoundManager()
+        self.audio_manager = AudioOutputManager(self)
+        self.keybind_manager = KeybindManager(self)
+        
+        self.sound_card_widgets, self.ordered_sound_ids, self.selected_sound_ids, self.last_selected_id = {}, [], set(), None
+        self.grid_columns = 4
+
+        self._init_tk_vars(); self._load_settings()
+        self._create_styles(); self._create_ui()
+        
+        self.populate_device_dropdowns()
+        self._apply_settings_to_ui()
+        self.populate_sound_list()
+        
+        self.keybind_manager.update_hotkeys()
+        self.audio_manager.start_main_stream()
+
+        self.update_now_playing_status()
+        self.protocol("WM_DELETE_WINDOW", self._on_app_closure)
+        self.update_idletasks()
+        self._on_frame_configure()
+
+    def center_toplevel(self, toplevel):
+        toplevel.update_idletasks()
+        
+        # main window geometry
+        main_x = self.winfo_x()
+        main_y = self.winfo_y()
+        main_width = self.winfo_width()
+        main_height = self.winfo_height()
+
+        # toplevel window geometry
+        top_width = toplevel.winfo_width()
+        top_height = toplevel.winfo_height()
+
+        # calculate position
+        x = main_x + (main_width - top_width) // 2
+        y = main_y + (main_height - top_height) // 2
+        
+        toplevel.geometry(f"+{x}+{y}")
+
+    def _init_tk_vars(self):
+        self.include_mic_in_mix_var, self.soundboard_monitor_enabled_var, self.mic_monitor_enabled_var = tk.BooleanVar(), tk.BooleanVar(), tk.BooleanVar()
+        self.master_volume_var, self.soundboard_monitor_volume_var, self.mic_monitor_volume_var = tk.DoubleVar(), tk.DoubleVar(), tk.DoubleVar()
+        self.current_theme_var, self.single_sound_mode_var, self.auto_start_mic_var = tk.StringVar(), tk.BooleanVar(), tk.BooleanVar()
+        self.stop_all_hotkey_var, self.toggle_mic_hotkey_var = tk.StringVar(value="Not Assigned"), tk.StringVar(value="Not Assigned")
+        self.search_var = tk.StringVar()
+
+    def _load_settings(self):
+        self.current_theme_var.set(self.style.theme.name)
+        settings_defaults = {"auto_start_mic": False, "soundboard_monitor_enabled": False, "mic_monitor_enabled": False, "master_volume": 100.0, "soundboard_monitor_volume": 75.0, "mic_monitor_volume": 75.0, "single_sound_mode": False}
+        for key, default in settings_defaults.items():
+            if hasattr(self, f"{key}_var"): getattr(self, f"{key}_var").set(self.app_settings.get_setting(key, default))
+        self.include_mic_in_mix_var.set(self.auto_start_mic_var.get())
+        self.stop_all_hotkey_var.set(get_hotkey_display_string(self.sound_manager.global_hotkeys.get("stop_all", [])))
+        self.toggle_mic_hotkey_var.set(get_hotkey_display_string(self.sound_manager.global_hotkeys.get("toggle_mic_to_mixer", [])))
+    
+    def _create_styles(self):
+        style = ttk.Style.get_instance()
+        border_color, selected_bg = style.colors.primary, style.colors.selectbg
+        style.configure('Card.TFrame', borderwidth=2, relief='solid', bordercolor=style.colors.bg)
+        style.map('Card.TFrame', bordercolor=[('selected', border_color)], background=[('selected', selected_bg)])
+        style.configure('Placeholder.TEntry', foreground=style.colors.secondary)
+        style.configure('TButton', wraplength=150, justify='center')
+
+    def _create_ui(self):
+        notebook = ttk.Notebook(self, padding=(10, 10, 10, 0))
+        notebook.pack(fill=BOTH, expand=True)
+        soundboard_tab, settings_tab = ttk.Frame(notebook), ttk.Frame(notebook)
+        notebook.add(soundboard_tab, text="Soundboard"); notebook.add(settings_tab, text="Settings")
+        self._create_soundboard_widgets(soundboard_tab)
+        self._create_settings_widgets(settings_tab)
+        status_frame = ttk.Frame(self, padding=(10, 5)); status_frame.pack(fill=X, side=BOTTOM)
+        self.status_message_var = tk.StringVar(value="Ready.")
+        self.status_label = ttk.Label(status_frame, textvariable=self.status_message_var)
+        self.status_label.pack(side=LEFT)
+        self.now_playing_var = tk.StringVar(value="Now Playing: None")
+        ttk.Label(status_frame, textvariable=self.now_playing_var, anchor=E).pack(side=RIGHT)
+
+    def _create_soundboard_widgets(self, parent):
+        parent.rowconfigure(2, weight=1); parent.columnconfigure(0, weight=1)
+        
+        # Search Bar
+        search_frame = ttk.Frame(parent)
+        search_frame.grid(row=0, column=0, sticky=EW, pady=(10, 10), padx=10)
+        search_frame.columnconfigure(0, weight=1)
+        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, font=("-size", 12))
+        self.search_entry.grid(row=0, column=0, sticky=EW, ipady=4)
+        self.clear_search_btn = ttk.Button(search_frame, text="✖", command=lambda: self.search_var.set(""), bootstyle="light", width=3)
+        self._add_placeholder(self.search_entry, "Search sounds...")
+
+        # Action Buttons
+        button_frame = ttk.Frame(parent)
+        button_frame.grid(row=1, column=0, sticky=EW, pady=(0, 10), padx=10)
+        ttk.Button(button_frame, text="✚ Add Sound", command=self.add_sound, bootstyle="primary").pack(side=LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="✖ Remove Selected", command=self.remove_selected_sounds, bootstyle="danger").pack(side=LEFT)
+        self.stop_all_button = ttk.Button(button_frame, text="Stop All Sounds", command=self.stop_all_sounds, bootstyle="danger-outline")
+        self.stop_all_button.pack(side=RIGHT)
+
+        # Sound List
+        list_container = ttk.Frame(parent)
+        list_container.grid(row=2, column=0, sticky='nsew', padx=10)
+        self.sound_canvas = tk.Canvas(list_container, highlightthickness=0, background=self.style.colors.bg)
+        scrollbar = ttk.Scrollbar(list_container, orient="vertical", command=self.sound_canvas.yview)
+        self.sound_list_frame = ttk.Frame(self.sound_canvas, padding=5)
+        self.sound_canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=RIGHT, fill=Y); self.sound_canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        self.canvas_window = self.sound_canvas.create_window((0, 0), window=self.sound_list_frame, anchor="nw")
+        
+        self.sound_list_frame.bind("<Configure>", lambda e: self.sound_canvas.configure(scrollregion=self.sound_canvas.bbox("all")))
+        self.sound_canvas.bind("<Configure>", self._on_frame_configure)
+        self.sound_canvas.bind("<Enter>", self._bind_mousewheel)
+        self.sound_canvas.bind("<Leave>", self._unbind_mousewheel)
+        
+        self.search_var.trace_add("write", lambda *args: self._filter_sounds())
+    
+    def _create_settings_widgets(self, parent):
+        notebook = ttk.Notebook(parent, padding=(0, 10, 0, 0)) # Add padding to top
+        notebook.pack(fill=BOTH, expand=True)
+        audio_tab, hotkey_tab, general_tab, setup_tab, about_tab = ttk.Frame(notebook), ttk.Frame(notebook), ttk.Frame(notebook), ttk.Frame(notebook), ttk.Frame(notebook)
+        notebook.add(audio_tab, text="Audio"); notebook.add(hotkey_tab, text="Hotkeys"); notebook.add(general_tab, text="General"); notebook.add(setup_tab, text="Setup Guide"); notebook.add(about_tab, text="About")
+        self._populate_audio_tab(audio_tab); self._populate_hotkey_tab(hotkey_tab); self._populate_general_tab(general_tab); self._populate_setup_guide_tab(setup_tab); self._populate_about_tab(about_tab)
+    
+    def _populate_audio_tab(self, parent):
+        device_frame = ttk.Labelframe(parent, text="Audio Devices", padding=10)
+        device_frame.pack(fill=X, pady=10, padx=10)
+        self.output_device_combo = self._create_device_combo(device_frame, "App Output", 0, self._on_output_device_selected, "The virtual audio device that other apps (like Discord, OBS) will listen to. Select your VB-CABLE here.")
+        self.input_device_combo = self._create_device_combo(device_frame, "Your Microphone", 1, self._on_input_device_selected, "Select your physical microphone here.")
+        self.sb_monitor_combo = self._create_device_combo(device_frame, "Listen to Sounds", 2, self._on_sb_monitor_device_selected, "To hear the soundboard through your headphones/speakers, select them here and check 'Enable' below.")
+        self.mic_monitor_combo = self._create_device_combo(device_frame, "Listen to Mic", 3, self._on_mic_monitor_device_selected, "To hear your own microphone (sidetone), select your headphones/speakers here and check 'Enable' below.")
+        
+        vol_frame = ttk.Labelframe(parent, text="Volume & Monitoring", padding=10)
+        vol_frame.pack(fill=X, pady=10, padx=10)
+        self._create_volume_slider(vol_frame, "Master Output", 0, self.master_volume_var, self.audio_manager.set_master_volume)
+        self._create_volume_slider(vol_frame, "Sounds Monitor", 1, self.soundboard_monitor_volume_var, self.audio_manager.set_sb_monitor_volume)
+        self._create_volume_slider(vol_frame, "Mic Monitor", 2, self.mic_monitor_volume_var, self.audio_manager.set_mic_monitor_volume)
+        ttk.Separator(vol_frame).grid(row=3, column=0, columnspan=3, sticky=EW, pady=10)
+        ttk.Checkbutton(vol_frame, text="Enable 'Listen to Sounds'", variable=self.soundboard_monitor_enabled_var, command=self.toggle_soundboard_monitor, bootstyle="round-toggle").grid(row=4, column=0, columnspan=3, sticky=W)
+        ttk.Checkbutton(vol_frame, text="Enable 'Listen to Mic'", variable=self.mic_monitor_enabled_var, command=self.toggle_mic_monitor, bootstyle="round-toggle").grid(row=5, column=0, columnspan=3, sticky=W, pady=(5,0))
+        ttk.Checkbutton(vol_frame, text="Include Mic in App Output", variable=self.include_mic_in_mix_var, command=self.toggle_include_mic_in_mix, bootstyle="round-toggle").grid(row=6, column=0, columnspan=3, sticky=W, pady=(5,0))
+
+    def _create_device_combo(self, parent, label, row, command, tooltip_text):
+        label_widget = ttk.Label(parent, text=label)
+        label_widget.grid(row=row, column=0, sticky=W, padx=5, pady=2)
+        ToolTip(label_widget, lambda: tooltip_text)
+        combo = ttk.Combobox(parent, state="readonly", width=35)
+        combo.grid(row=row, column=1, sticky=EW, padx=5)
+        combo.bind("<<ComboboxSelected>>", command)
+        parent.columnconfigure(1, weight=1); return combo
+
+    def _create_volume_slider(self, parent, label, row, var, setter_func):
+        if label: ttk.Label(parent, text=label).grid(row=row, column=0, sticky=W, padx=5, pady=2)
+        scale = ttk.Scale(parent, from_=0, to=125, variable=var)
+        scale.grid(row=row, column=1, sticky=EW, padx=5)
+        label_widget = ttk.Label(parent, text=f"{int(var.get())}%", width=4)
+        label_widget.grid(row=row, column=2, padx=5)
+        
+        def update_volume(*args):
+            volume_percent = var.get()
+            label_widget.config(text=f"{int(volume_percent)}%")
+            if setter_func:
+                setter_func(volume_percent / 100.0)
+
+        var.trace_add("write", update_volume)
+        scale.bind("<ButtonRelease-1>", lambda e: self._save_app_settings())
+        parent.columnconfigure(1, weight=1)
+    
+    def _populate_hotkey_tab(self, parent):
+        frame = ttk.Labelframe(parent, text="Global Hotkeys", padding=10)
+        frame.pack(fill=X, padx=10, pady=10)
+        self._create_hotkey_entry(frame, "Stop All Sounds", 0, self.stop_all_hotkey_var, "stop_all")
+        self._create_hotkey_entry(frame, "Toggle Mic in Mix", 1, self.toggle_mic_hotkey_var, "toggle_mic_to_mixer")
+
+    def _create_hotkey_entry(self, parent, label_text, row, var, action):
+        ttk.Label(parent, text=label_text).grid(row=row, column=0, sticky=W, padx=5, pady=5)
+        ttk.Label(parent, textvariable=var, bootstyle="info").grid(row=row, column=1, sticky=EW, padx=5)
+        ttk.Button(parent, text="Assign", command=lambda: self._assign_global_hotkey(action, var)).grid(row=row, column=2, padx=5)
+        ttk.Button(parent, text="Clear", command=lambda: self._clear_global_hotkey(action, var)).grid(row=row, column=3, padx=5)
+        parent.columnconfigure(1, weight=1)
+        
+    def _populate_general_tab(self, parent):
+        frame = ttk.Labelframe(parent, text="Application Settings", padding=10)
+        frame.pack(fill=X, padx=10, pady=10)
+        ttk.Label(frame, text="Theme:").grid(row=0, column=0, sticky=W, padx=5, pady=5)
+        theme_combo = ttk.Combobox(frame, textvariable=self.current_theme_var, values=self.style.theme_names(), state="readonly")
+        theme_combo.grid(row=0, column=1, sticky=EW, padx=5)
+        theme_combo.bind("<<ComboboxSelected>>", self._on_theme_changed)
+        ttk.Checkbutton(frame, text="Single Sound Mode (stop others on play)", variable=self.single_sound_mode_var, command=self._on_single_sound_mode_changed, bootstyle="round-toggle").grid(row=1, column=0, columnspan=2, sticky=W, pady=5)
+        ttk.Checkbutton(frame, text="Automatically include Mic on startup", variable=self.auto_start_mic_var, command=lambda: self._save_app_settings(), bootstyle="round-toggle").grid(row=2, column=0, columnspan=2, sticky=W)
+        frame.columnconfigure(1, weight=1)
+
+    def _populate_setup_guide_tab(self, parent):
+        guide_frame = ttk.Labelframe(parent, text="VB-CABLE Setup", padding=15)
+        guide_frame.pack(fill=X, padx=10, pady=10)
+        
+        instructions = (
+            "WarpBoard requires a free 'virtual audio cable' to send audio to other applications (like Discord, OBS, or games).\n\n"
+            "1. Download VB-CABLE from the official site.\n"
+            "2. Extract the .zip file to a folder.\n"
+            "3. Right-click 'VBCABLE_Setup_x64.exe' and select 'Run as administrator'.\n"
+            "4. Click 'Install Driver' and reboot your PC when prompted.\n"
+            "5. In WarpBoard's 'Audio' settings, select 'CABLE Input' as the 'App Output'."
+        )
+        label = ttk.Label(guide_frame, text=instructions, justify=LEFT)
+        label.pack(anchor=W, pady=5, fill=X)
+        label.winfo_toplevel().update_idletasks() # Ensure wraplength is calculated correctly
+        label.configure(wraplength=guide_frame.winfo_width() - 30)
+
+        ttk.Button(guide_frame, text="Download VB-CABLE", command=lambda: webbrowser.open(VB_CABLE_URL), bootstyle="primary").pack(pady=10)
+        
+        troubleshoot_frame = ttk.Labelframe(parent, text="Troubleshooting", padding=15)
+        troubleshoot_frame.pack(fill=X, padx=10, pady=10)
+        ttk.Label(troubleshoot_frame, text="If you encounter issues, the log file can help identify the problem.").pack(anchor=W, pady=5)
+        ttk.Button(troubleshoot_frame, text="Open Log File", command=self._open_log_file, bootstyle="info-outline").pack(pady=10)
+
+    def _open_log_file(self):
+        try:
+            if platform.system() == "Windows":
+                os.startfile(LOG_FILE)
+            elif platform.system() == "Darwin": # macOS
+                subprocess.run(["open", LOG_FILE], check=True)
+            else: # Linux
+                subprocess.run(["xdg-open", LOG_FILE], check=True)
+        except Exception as e:
+            logging.error(f"Failed to open log file: {e}")
+            messagebox.showerror("Error", f"Could not open log file.\nLocation: {LOG_FILE}", parent=self)
+        
+    def _populate_about_tab(self, parent):
+        frame = ttk.Labelframe(parent, text="About WarpBoard", padding=15)
+        frame.pack(fill=BOTH, expand=True, padx=10, pady=10)
+
+        # Title
+        ttk.Label(frame, text="WarpBoard", font="-size 16 -weight bold").pack(pady=5)
+        ttk.Label(frame, text=f"Version: {APP_VERSION}").pack()
+        ttk.Label(frame, text="A simple, lightweight soundboard.").pack(pady=(10, 20))
+
+        # Underlined font for links
+        default_font = font.nametofont("TkDefaultFont")
+        link_font = default_font.copy()
+        link_font.configure(underline=True)
+
+        # Author / Profile
+        profile_label = ttk.Label(
+            frame,
+            text="Created by: Asta main",
+            foreground=self.style.colors.primary,
+            font=link_font,
+            cursor="hand2"
+        )
+        profile_label.pack()
+        profile_label.bind("<Button-1>", lambda e: webbrowser.open(PROFILE_URL))
+        ToolTip(profile_label, lambda: f"Open profile: {PROFILE_URL}")
+
+        # Website / Docs
+        docs_label = ttk.Label(
+            frame,
+            text="Documentation",
+            foreground=self.style.colors.primary,
+            font=link_font,
+            cursor="hand2"
+        )
+        docs_label.pack()
+        docs_label.bind("<Button-1>", lambda e: webbrowser.open(DOCS_URL))
+        ToolTip(docs_label, lambda: f"Open documentation: {DOCS_URL}")
+
+        # GitHub / Issues
+        github_label = ttk.Label(
+            frame,
+            text="Report an issue",
+            foreground=self.style.colors.primary,
+            font=link_font,
+            cursor="hand2"
+        )
+        github_label.pack()
+        github_label.bind("<Button-1>", lambda e: webbrowser.open(ISSUES_URL))
+        ToolTip(github_label, lambda: f"Report bugs at: {ISSUES_URL}")
+
+        # License
+        ttk.Label(frame, text="License: MIT", foreground="gray").pack(pady=(10, 5))
+
+        # Keyboard shortcuts
+        shortcuts_frame = ttk.Labelframe(frame, text="Keyboard Shortcuts", padding=10)
+        shortcuts_frame.pack(fill=X, pady=(10, 5))
+
+        shortcuts = [
+            ("Ctrl + O", "Open a sound file"),
+            ("Ctrl + S", "Save board"),
+            ("Space", "Play/Pause"),
+            ("Esc", "Stop playback"),
+        ]
+        for key, action in shortcuts:
+            ttk.Label(shortcuts_frame, text=f"{key} – {action}").pack(anchor="w")
+
+        # Acknowledgements
+        ttk.Label(frame, text="Acknowledgements:", font="-weight bold").pack(pady=(10, 5))
+        ttk.Label(frame, text="• ttkbootstrap for UI\n• yt-dlp for audio handling\n• Community contributors").pack(anchor="w")
+
+    def _on_frame_configure(self, event=None):
+        canvas_width = self.sound_canvas.winfo_width()
+        if canvas_width > 1:
+            self.sound_canvas.itemconfig(self.canvas_window, width=canvas_width)
+            new_cols = max(1, canvas_width // 200)
+            if hasattr(self, 'grid_columns') and new_cols != self.grid_columns:
+                self.grid_columns = new_cols
+                self._filter_sounds()
+    
+    def _bind_mousewheel(self, event): self.bind_all("<MouseWheel>", self._on_mousewheel)
+    def _unbind_mousewheel(self, event): self.unbind_all("<MouseWheel>")
+    def _on_mousewheel(self, event):
+        try:
+            widget = self.winfo_containing(event.x_root, event.y_root)
+            if widget and str(widget).startswith(str(self.sound_canvas)):
+                if event.delta > 0: self.sound_canvas.yview_scroll(-1, "units")
+                else: self.sound_canvas.yview_scroll(1, "units")
+        except KeyError:
+            pass
+
+    def _add_placeholder(self, entry, placeholder):
+        entry.insert(0, placeholder)
+        entry.configure(style='Placeholder.TEntry')
+        def on_focus_in(event):
+            if entry.get() == placeholder:
+                entry.delete(0, "end")
+                entry.configure(style='TEntry')
+        def on_focus_out(event):
+            if not entry.get():
+                entry.insert(0, placeholder)
+                entry.configure(style='Placeholder.TEntry')
+        entry.bind("<FocusIn>", on_focus_in)
+        entry.bind("<FocusOut>", on_focus_out)
+
+    def _filter_sounds(self, *args):
+        query = self.search_var.get().lower()
+        if query == "search sounds...": query = ""
+
+        if query:
+            self.clear_search_btn.grid(row=0, column=1, sticky=E, padx=(4,0))
+        else:
+            self.clear_search_btn.grid_forget()
+
+        for i in range(self.sound_list_frame.grid_size()[0]):
+            self.sound_list_frame.columnconfigure(i, weight=0)
+        for i in range(self.grid_columns):
+            self.sound_list_frame.columnconfigure(i, weight=1)
+
+        row, col = 0, 0
+        for sound_id in self.ordered_sound_ids:
+            sound = self.sound_manager.get_sound_by_id(sound_id)
+            if sound:
+                card_frame = self.sound_card_widgets[sound_id]['frame']
+                if query in sound['name'].lower():
+                    card_frame.grid(row=row, column=col, padx=5, pady=5, sticky='nsew')
+                    col += 1
+                    if col >= self.grid_columns:
+                        col = 0
+                        row += 1
+                else:
+                    card_frame.grid_forget()
+        
+        self.sound_canvas.yview_moveto(0)
+        self.sound_canvas.update_idletasks()
+        self.sound_canvas.configure(scrollregion=self.sound_canvas.bbox("all"))
+
+    def populate_sound_list(self):
+        for widget in self.sound_list_frame.winfo_children(): widget.destroy()
+        self.sound_card_widgets.clear()
+        self.ordered_sound_ids = sorted([s for s in self.sound_manager.sounds], key=lambda x: x['name'].lower())
+        self.ordered_sound_ids = [s['id'] for s in self.ordered_sound_ids]
+        
+        for sound_id in self.ordered_sound_ids:
+            sound = self.sound_manager.get_sound_by_id(sound_id)
+            if sound: self._add_sound_card_to_ui(sound)
+        self._filter_sounds()
+
+    def _add_sound_card_to_ui(self, sound):
+        sound_id = sound["id"]
+        card_frame = ttk.Frame(self.sound_list_frame, style='Card.TFrame', padding=10)
+        card_frame.columnconfigure(0, weight=1)
+
+        top_button_frame = ttk.Frame(card_frame)
+        top_button_frame.grid(row=0, column=0, sticky=EW, pady=5)
+        top_button_frame.columnconfigure(0, weight=1)
+        
+        play_btn = ttk.Button(top_button_frame, text=sound['name'][:MAX_DISPLAY_NAME_LENGTH], command=lambda: self.play_sound(sound_id), bootstyle="success")
+        play_btn.grid(row=0, column=0, sticky=EW, ipady=5)
+        
+        stop_btn = ttk.Button(top_button_frame, text="■", command=lambda: self.stop_sound(sound_id), bootstyle="danger", width=3)
+        stop_btn.grid(row=0, column=1, sticky="ns", padx=(5,0))
+
+
+        hotkey_var = tk.StringVar(value=get_hotkey_display_string(sound['hotkeys']))
+        hotkey_label = ttk.Label(card_frame, textvariable=hotkey_var, bootstyle="secondary", anchor="center")
+        
+        bottom_frame = ttk.Frame(card_frame)
+        loop_var = tk.BooleanVar(value=sound.get("loop", False))
+        loop_check = ttk.Checkbutton(bottom_frame, text="Loop", variable=loop_var, bootstyle="round-toggle", command=lambda s_id=sound_id, v=loop_var: self._update_sound_property_and_save(s_id, "loop", v.get()))
+        edit_btn = ttk.Button(bottom_frame, text="⚙", command=lambda s_id=sound_id: self._open_edit_sound_menu(s_id), bootstyle="light-outline", width=3)
+
+        hotkey_label.grid(row=1, column=0, sticky=EW)
+        bottom_frame.grid(row=2, column=0, sticky=EW, pady=(10, 0))
+        bottom_frame.columnconfigure(0, weight=1)
+        bottom_frame.columnconfigure(1, weight=1)
+        loop_check.grid(row=0, column=0, sticky=W)
+        edit_btn.grid(row=0, column=1, sticky=E)
+
+        if not sound.get("enabled", True):
+            play_btn.configure(state="disabled")
+        
+        self.sound_card_widgets[sound_id] = {"frame": card_frame, "hotkey_var": hotkey_var, "loop_var": loop_var, "play_btn": play_btn}
+        
+        tooltip_text_func = lambda s=sound: f"Name: {s['name']}\nDuration: {s.get('duration', 0):.2f} seconds"
+        ToolTip(card_frame, tooltip_text_func)
+
+        for widget in [card_frame, hotkey_label, bottom_frame, top_button_frame]:
+            widget.bind("<Button-1>", lambda e, s_id=sound_id: self._on_card_click(e, s_id))
+
+    def _on_card_click(self, event, sound_id):
+        ctrl_pressed, shift_pressed = (event.state & 4) != 0, (event.state & 1) != 0
+        if shift_pressed and self.last_selected_id:
+            try:
+                visible_ids = []
+                for sid in self.ordered_sound_ids:
+                    try:
+                        if self.sound_card_widgets[sid]['frame'].winfo_ismapped():
+                            visible_ids.append(sid)
+                    except (KeyError, tk.TclError):
+                        continue
+                start = visible_ids.index(self.last_selected_id)
+                end = visible_ids.index(sound_id)
+                if start > end: start, end = end, start
+                if not ctrl_pressed: self.selected_sound_ids.clear()
+                for i in range(start, end + 1): self.selected_sound_ids.add(visible_ids[i])
+            except (ValueError, KeyError, tk.TclError): 
+                self.selected_sound_ids = {sound_id}
+        elif ctrl_pressed:
+            if sound_id in self.selected_sound_ids: self.selected_sound_ids.remove(sound_id)
+            else: self.selected_sound_ids.add(sound_id)
+        else: self.selected_sound_ids = {sound_id}
+        self.last_selected_id = sound_id
+        self._update_card_styles()
+
+    def _update_card_styles(self):
+        for sound_id, widgets in self.sound_card_widgets.items():
+            widgets['frame'].state(['selected'] if sound_id in self.selected_sound_ids else ['!selected'])
+
+    def _remove_sound_card_from_ui(self, sound_id):
+        if sound_id in self.sound_card_widgets:
+            self.sound_card_widgets[sound_id]['frame'].destroy()
+            del self.sound_card_widgets[sound_id]
+            if sound_id in self.ordered_sound_ids: self.ordered_sound_ids.remove(sound_id)
+    
+    def _open_edit_sound_menu(self, sound_id):
+        sound = self.sound_manager.get_sound_by_id(sound_id);
+        if not sound: return
+        
+        edit_window = Toplevel(self); edit_window.title(f"Edit '{sound['name']}'"); edit_window.transient(self)
+        main_frame = ttk.Frame(edit_window, padding=15); main_frame.pack(fill=BOTH, expand=True)
+
+        # --- Enabled Checkbox ---
+        enabled_frame = ttk.Labelframe(main_frame, text="Status", padding=5)
+        enabled_frame.pack(fill=X, pady=5)
+        enabled_var = tk.BooleanVar(value=sound.get("enabled", True))
+        ttk.Checkbutton(enabled_frame, text="Sound Enabled", variable=enabled_var, bootstyle="round-toggle").pack(padx=5, pady=5, anchor=W)
+
+        name_frame = ttk.Labelframe(main_frame, text="Sound Name", padding=5); name_frame.pack(fill=X, pady=5)
+        name_var = tk.StringVar(value=sound['name']); ttk.Entry(name_frame, textvariable=name_var).pack(fill=X, padx=5, pady=5)
+        
+        hotkey_frame = ttk.Labelframe(main_frame, text="Hotkey", padding=5); hotkey_frame.pack(fill=X, pady=5)
+        hotkey_var = tk.StringVar(value=get_hotkey_display_string(sound['hotkeys']))
+        ttk.Label(hotkey_frame, textvariable=hotkey_var, bootstyle="info").grid(row=0, column=0, sticky=EW, padx=5, pady=5)
+        ttk.Button(hotkey_frame, text="Assign", command=lambda: self._assign_sound_hotkey(sound_id, hotkey_var)).grid(row=0, column=1, padx=5)
+        ttk.Button(hotkey_frame, text="Clear", command=lambda: self._clear_sound_hotkey(sound_id, hotkey_var)).grid(row=0, column=2, padx=5)
+        hotkey_frame.columnconfigure(0, weight=1)
+        
+        volume_frame = ttk.Labelframe(main_frame, text="Volume", padding=5); volume_frame.pack(fill=X, pady=5)
+        volume_var = tk.DoubleVar(value=sound.get("volume", 1.0) * 100)
+        self._create_volume_slider(volume_frame, "", 0, volume_var, None)
+        
+        def _save_changes():
+            try:
+                self.sound_manager.update_sound_property(sound_id, "volume", volume_var.get() / 100.0)
+                self.sound_manager.update_sound_property(sound_id, "enabled", enabled_var.get())
+                if name_var.get() != sound['name']:
+                    self.sound_manager.rename_sound(sound_id, name_var.get())
+                self.sound_manager.save_config()
+                self.keybind_manager.update_hotkeys()
+                self.populate_sound_list() 
+                edit_window.destroy()
+            except ValueError as e: messagebox.showerror("Rename Error", str(e), parent=edit_window)
+
+        ttk.Button(main_frame, text="Save and Close", command=_save_changes, bootstyle="primary").pack(pady=15)
+        self.center_toplevel(edit_window)
+        edit_window.grab_set()
+
+    def _update_sound_property_and_save(self, sound_id, key, value):
+        self.sound_manager.update_sound_property(sound_id, key, value)
+        self.sound_manager.save_config()
+    def add_sound(self):
+        file_paths = filedialog.askopenfilenames(filetypes=SUPPORTED_FORMATS)
+        if not file_paths: return
+        for path in file_paths:
+            try:
+                self.sound_manager.add_sound(path)
+                self.show_status_message(f"Added: {os.path.basename(path)}", "success")
+            except Exception as e:
+                messagebox.showerror("Add Sound Error", f"Failed to add sound from {os.path.basename(path)}.\nError: {e}", parent=self)
+                self.show_status_message(f"Failed to add sound.", "danger")
+        self.keybind_manager.update_hotkeys()
+        self.populate_sound_list()
+        
+    def remove_selected_sounds(self):
+        if not self.selected_sound_ids: self.show_status_message("No sounds selected.", "warning"); return
+        if messagebox.askyesno("Confirm Removal", f"Are you sure you want to permanently remove {len(self.selected_sound_ids)} sound(s)?", parent=self):
+            ids_to_remove = self.selected_sound_ids.copy()
+            self.sound_manager.remove_sounds(ids_to_remove)
+            for sound_id in ids_to_remove: self._remove_sound_card_from_ui(sound_id)
+            self.selected_sound_ids.clear(); self.last_selected_id = None
+            self.keybind_manager.update_hotkeys()
+            self.show_status_message(f"Removed {len(ids_to_remove)} sound(s).", "success")
+            self.populate_sound_list()
+
+    def play_sound(self, sound_id):
+        sound = self.sound_manager.get_sound_by_id(sound_id)
+        if not sound or not sound.get("enabled", True): return
+
+        audio_data = self.sound_manager.sound_data_cache.get(sound_id)
+        if audio_data is not None:
+            self.audio_manager.mixer.add_sound(audio_data, sound["volume"], sound["loop"], sound_id, sound["name"])
 
     def stop_sound(self, sound_id):
         if self.audio_manager.mixer.remove_sound_by_id(sound_id):
-            sound = next((s for s in self.sound_manager.sounds if s["id"] == sound_id), None)
-            if sound:
-                self.show_status_message(f"Stopped sound: {sound['name']}", bootstyle="success")
-            else:
-                self.show_status_message("Sound not found.", bootstyle="danger")
-        else:
-            self.show_status_message("Sound not currently playing.", bootstyle="warning")
-
+            self.show_status_message(f"Stopped: {self.sound_manager.get_sound_by_id(sound_id)['name']}", "info")
     def stop_all_sounds(self):
-        self.audio_manager.mixer.clear_sounds()
-        self.show_status_message("All sounds stopped.", bootstyle="success")
+        self.audio_manager.mixer.clear_sounds(); self.show_status_message("All sounds stopped.", "success")
 
     def toggle_include_mic_in_mix(self):
-        self.audio_manager.include_mic_in_mix = self.include_mic_in_mix_var.get()
-        if self.audio_manager.include_mic_in_mix:
-            self.audio_manager.start_mic_input_stream()
-            self.mic_status_info.set("Mic: On")
-            self.show_status_message("Microphone included in mix.", bootstyle="success")
+        is_enabled = self.include_mic_in_mix_var.get()
+        if is_enabled:
+            self.audio_manager.mic_inclusion_event.set()
+            self.audio_manager.start_mic_input()
         else:
-            self.audio_manager.stop_mic_input_stream()
-            self.mic_status_info.set("Mic: Off")
-            self.show_status_message("Microphone removed from mix.", bootstyle="success")
-        self._save_settings()
-
-    def toggle_mic_to_mixer_from_hotkey(self):
-        self.include_mic_in_mix_var.set(not self.include_mic_in_mix_var.get())
-        self.toggle_include_mic_in_mix()
+            self.audio_manager.mic_inclusion_event.clear()
+            self.audio_manager.stop_mic_input()
+        self._save_app_settings()
 
     def toggle_soundboard_monitor(self):
-        self.audio_manager.soundboard_monitor_enabled = self.soundboard_monitor_enabled_var.get()
-        if self.audio_manager.soundboard_monitor_enabled:
-            self.audio_manager.start_soundboard_monitor_stream()
-            self.show_status_message("Soundboard monitor enabled.", bootstyle="success")
-        else:
-            self.audio_manager.stop_soundboard_monitor_stream()
-            self.show_status_message("Soundboard monitor disabled.", bootstyle="success")
-        self._save_settings()
-
+        is_enabled = self.soundboard_monitor_enabled_var.get()
+        if is_enabled: self.audio_manager.start_soundboard_monitor_stream()
+        else: self.audio_manager.stop_soundboard_monitor_stream()
+        self._save_app_settings()
+        
     def toggle_mic_monitor(self):
-        self.audio_manager.mic_monitor_enabled = self.mic_monitor_enabled_var.get()
-        if self.audio_manager.mic_monitor_enabled:
-            self.audio_manager.start_mic_monitor_stream()
-            self.show_status_message("Mic monitor enabled.", bootstyle="success")
+        is_enabled = self.mic_monitor_enabled_var.get()
+        if is_enabled: self.audio_manager.start_mic_monitor_stream()
+        else: self.audio_manager.stop_mic_monitor_stream()
+        self._save_app_settings()
+        
+    def toggle_mic_to_mixer_from_hotkey(self):
+        self.include_mic_in_mix_var.set(not self.include_mic_in_mix_var.get()); self.toggle_include_mic_in_mix()
+        
+    def _assign_sound_hotkey(self, sound_id, hotkey_var):
+        sound = self.sound_manager.get_sound_by_id(sound_id);
+        if not sound: return
+        def on_complete(hotkey_list):
+            if hotkey_list is None: return
+            if tuple(sorted(hotkey_list)) in self.sound_manager.get_all_assigned_hotkeys():
+                messagebox.showwarning("Hotkey In Use", "This hotkey is already assigned.", parent=self)
+                return
+            self.sound_manager.update_sound_property(sound_id, "hotkeys", hotkey_list)
+            display_str = get_hotkey_display_string(hotkey_list)
+            hotkey_var.set(display_str)
+            self.sound_card_widgets[sound_id]['hotkey_var'].set(display_str)
+            self.keybind_manager.update_hotkeys()
+        HotkeyRecorder(self, sound['name'], on_complete)
+        
+    def _clear_sound_hotkey(self, sound_id, hotkey_var):
+        self.sound_manager.update_sound_property(sound_id, "hotkeys", [])
+        hotkey_var.set("Not Assigned")
+        self.sound_card_widgets[sound_id]['hotkey_var'].set("Not Assigned")
+        self.keybind_manager.update_hotkeys()
+        
+    def _assign_global_hotkey(self, action, var):
+        def on_complete(hotkey_list):
+            if hotkey_list is None: return
+            self.sound_manager.set_global_hotkey(action, hotkey_list)
+            var.set(get_hotkey_display_string(hotkey_list)); self.keybind_manager.update_hotkeys()
+        HotkeyRecorder(self, action.replace("_", " ").title(), on_complete)
+        
+    def _clear_global_hotkey(self, action, var):
+        self.sound_manager.set_global_hotkey(action, []); var.set("Not Assigned"); self.keybind_manager.update_hotkeys()
+        
+    def show_status_message(self, message, style="info"):
+        self.status_message_var.set(message); self.status_label.configure(bootstyle=style)
+        self.after(5000, lambda: self.status_label.configure(bootstyle="secondary"))
+        
+    def update_now_playing_status(self):
+        with current_playing_sound_details_lock:
+            names, is_active = current_playing_sound_details.get("names", []), current_playing_sound_details.get("active", False)
+        status_text = "Now Playing: "
+        if is_active:
+            self.stop_all_button.configure(bootstyle="danger")
+            if names:
+                status_text += ", ".join(names[:2]);
+                if len(names) > 2: status_text += f" & {len(names) - 2} more"
+            else: status_text += "Microphone"
         else:
-            self.audio_manager.stop_mic_monitor_stream()
-            self.show_status_message("Mic monitor disabled.", bootstyle="success")
-        self._save_settings()
-
-    def show_status_message(self, message, bootstyle="info"):
-        self.status_message_var.set(message)
-        self.status_label.configure(bootstyle=bootstyle)
-        self.after(5000, lambda: self.status_label.configure(style="info.TLabel"))
-        logging.info(f"Status message: {message}")
-
-    def _update_now_playing_periodically(self):
-        while True:
-            try:
-                with current_playing_sound_details_lock:
-                    names = current_playing_sound_details.get("names", [])
-                    is_active = current_playing_sound_details.get("active", False)
-                
-                if is_active:
-                    if names:
-                        display_names = ", ".join(names[:3])
-                        if len(names) > 3:
-                            display_names += f" (+{len(names) - 3} more)"
-                        self.currently_playing_info.set(f"Now Playing: {display_names}")
-                        self.soundboard_output_status_info.set("Soundboard Output: On")
-                    else:
-                        self.currently_playing_info.set("Now Playing: Mic Only")
-                        self.soundboard_output_status_info.set("Soundboard Output: On")
-                else:
-                    self.currently_playing_info.set("Now Playing: None")
-                    self.soundboard_output_status_info.set("Soundboard Output: Off")
-                
-                self.update()
-                time.sleep(0.5)
-            except Exception as e:
-                logging.error(f"Error in now playing updater thread: {e}", exc_info=True)
-                time.sleep(1)
-
+            self.stop_all_button.configure(bootstyle="danger-outline"); status_text += "None"
+        self.now_playing_var.set(status_text)
+        self.after(250, self.update_now_playing_status)
+        
+    def _save_app_settings(self):
+        settings = {"theme": self.current_theme_var.get(), "master_volume": self.master_volume_var.get(), "soundboard_monitor_volume": self.soundboard_monitor_volume_var.get(), "mic_monitor_volume": self.mic_monitor_volume_var.get(), "soundboard_monitor_enabled": self.soundboard_monitor_enabled_var.get(), "mic_monitor_enabled": self.mic_monitor_enabled_var.get(), "auto_start_mic": self.auto_start_mic_var.get(), "single_sound_mode": self.single_sound_mode_var.get()}
+        self.app_settings.save_settings(settings); logging.info("Application settings saved.")
+        
     def _on_app_closure(self):
-        self.audio_manager.close()
-        self.keybind_manager.stop()
-        self.destroy()
-        logging.info("Application closed.")
+        self._save_app_settings(); self.sound_manager.save_config()
+        self.audio_manager.close(); self.keybind_manager.stop(); self.destroy()
+        logging.info("--- WarpBoard Closed ---")
+        
+    def populate_device_dropdowns(self):
+        output_names = [dev['name'] for dev in self.audio_manager.output_devices]
+        input_names = [dev['name'] for dev in self.audio_manager.input_devices]
+        for combo, names in [(self.output_device_combo, output_names), (self.input_device_combo, input_names), (self.sb_monitor_combo, output_names), (self.mic_monitor_combo, output_names)]:
+            combo['values'] = names
+        self._set_combo_from_setting(self.output_device_combo, "output_device_id", self.audio_manager.virtual_mic_device_id)
+        self._set_combo_from_setting(self.input_device_combo, "input_device_id")
+        self._set_combo_from_setting(self.sb_monitor_combo, "soundboard_monitor_device_id")
+        self._set_combo_from_setting(self.mic_monitor_combo, "mic_monitor_device_id")
+        
+    def _set_combo_from_setting(self, combo, setting_key, default_id=None):
+        device_id = self.app_settings.get_setting(setting_key, default_id)
+        try:
+            device_name = self.audio_manager.get_device_name_by_index(device_id)
+            if device_name in combo['values']: combo.set(device_name)
+            elif combo['values']: combo.current(0)
+        except Exception:
+            if combo['values']: combo.current(0)
+            
+    def _on_output_device_selected(self, event):
+        idx = self.audio_manager.output_devices[event.widget.current()]['index']
+        self.app_settings.save_settings({"output_device_id": idx}); self.audio_manager.start_main_stream()
+        
+    def _on_input_device_selected(self, event):
+        idx = self.audio_manager.input_devices[event.widget.current()]['index']
+        self.app_settings.save_settings({"input_device_id": idx})
+        if self.include_mic_in_mix_var.get(): self.audio_manager.start_mic_input()
+        
+    def _on_sb_monitor_device_selected(self, event):
+        idx = self.audio_manager.output_devices[event.widget.current()]['index']
+        self.app_settings.save_settings({"soundboard_monitor_device_id": idx})
+        if self.soundboard_monitor_enabled_var.get(): self.audio_manager.start_soundboard_monitor_stream()
+        
+    def _on_mic_monitor_device_selected(self, event):
+        idx = self.audio_manager.output_devices[event.widget.current()]['index']
+        self.app_settings.save_settings({"mic_monitor_device_id": idx})
+        if self.mic_monitor_enabled_var.get(): self.audio_manager.start_mic_monitor_stream()
+        
+    def _on_theme_changed(self, event):
+        messagebox.showinfo("Theme Change", "Theme will be applied on next restart.", parent=self)
+        self._save_app_settings()
+        
+    def _on_single_sound_mode_changed(self):
+        self.audio_manager.mixer.set_single_sound_mode(self.single_sound_mode_var.get())
+        self._save_app_settings()
+        
+    def _apply_settings_to_ui(self):
+        self.audio_manager.mixer.set_single_sound_mode(self.single_sound_mode_var.get())
+        
+        self.audio_manager.set_master_volume(self.master_volume_var.get() / 100.0)
+        self.audio_manager.set_sb_monitor_volume(self.soundboard_monitor_volume_var.get() / 100.0)
+        self.audio_manager.set_mic_monitor_volume(self.mic_monitor_volume_var.get() / 100.0)
 
-    def get_pynput_key_string(self, key):
-        return get_pynput_key_string(key)
+        self.toggle_include_mic_in_mix()
+        self.toggle_soundboard_monitor()
+        self.toggle_mic_monitor()
+
+def ensure_folders():
+    for folder in [SOUNDS_DIR, CONFIG_DIR]:
+        os.makedirs(folder, exist_ok=True)
 
 if __name__ == "__main__":
+    ensure_folders()
+    DependencyChecker.run_checks()
     app = SoundboardApp()
     app.mainloop()
+
