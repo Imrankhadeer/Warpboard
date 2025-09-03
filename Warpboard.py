@@ -17,6 +17,7 @@ import importlib.metadata
 from collections import deque
 from threading import Lock, Event
 from pynput import keyboard, mouse
+from typing import List
 import enum
 import logging
 import webbrowser
@@ -24,7 +25,7 @@ import platform
 import subprocess
 
 # --- Configuration and Constants ---
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.path.dirname(os.path.abspath(sys.argv[0]))
 SOUNDS_DIR = os.path.join(ROOT_DIR, "sounds")
 CONFIG_DIR = os.path.join(ROOT_DIR, "config")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "soundboard_config.json")
@@ -32,11 +33,12 @@ APP_SETTINGS_FILE = os.path.join(CONFIG_DIR, "app_settings.json")
 LOG_FILE = os.path.join(ROOT_DIR, "warpboard.log")
 
 VB_CABLE_URL = "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack43.zip"
-PROFILE_URL = "https://github.com/Imrankhadeer" # Placeholder URL
-APP_VERSION = "2.3.7" # UI Centering & Stability Fix
+PROFILE_URL = "https://github.com/Imrankhadeer"
+APP_VERSION = "2.4.0" # Stability and Bugfix Release
 
-DOCS_URL = "https://your-docs-link"
+DOCS_URL = "https://github.com/Imrankhadeer/Warpboard/wiki"
 ISSUES_URL = "https://github.com/Imrankhadeer/Warpboard/issues"
+
 
 # --- Audio Settings ---
 SUPPORTED_FORMATS = [("Audio Files", "*.wav *.mp3 *.ogg *.flac")]
@@ -65,10 +67,10 @@ current_playing_sound_details_lock = threading.Lock()
 # --- Hotkey System ---
 class KeyModifier(enum.Flag):
     NONE = 0
-    SHIFT = 1
-    CTRL = 2
-    ALT = 4
-    SUPER = 8
+    SHIFT = enum.auto()
+    CTRL = enum.auto()
+    ALT = enum.auto()
+    SUPER = enum.auto()
 
 class KeyCode(enum.Enum):
     UNKNOWN = 'unknown'
@@ -103,7 +105,6 @@ class Hotkey:
         parts.append(self.raw_key if self.raw_key else self.key_code.value)
         return sorted(parts)
 
-    @classmethod
     def from_json_serializable(cls, hotkey_list: list[str]):
         modifiers, key_str = KeyModifier.NONE, None
         for s in hotkey_list:
@@ -208,8 +209,8 @@ class HotkeyRecorder(Toplevel):
         parent.center_toplevel(self)
         self.grab_set()
 
-        self.keyboard_listener = keyboard.Listener(on_press=self._on_key_press, suppress=False)
-        self.mouse_listener = mouse.Listener(on_click=self._on_mouse_click, suppress=False)
+        self.keyboard_listener = keyboard.Listener(on_press=self._on_key_press, suppress=True)
+        self.mouse_listener = mouse.Listener(on_click=self._on_mouse_click, suppress=True)
         self.keyboard_listener.start()
         self.mouse_listener.start()
         self._reset_timeout()
@@ -236,8 +237,8 @@ class HotkeyRecorder(Toplevel):
         self.timeout_id = self.after(1200, self._finalize_hotkey)
 
     def _stop_listeners(self):
-        if self.keyboard_listener: self.keyboard_listener.stop()
-        if self.mouse_listener: self.mouse_listener.stop()
+        if self.keyboard_listener and self.keyboard_listener.is_alive(): self.keyboard_listener.stop()
+        if self.mouse_listener and self.mouse_listener.is_alive(): self.mouse_listener.stop()
 
     def _finalize_hotkey(self):
         self._stop_listeners()
@@ -307,7 +308,7 @@ class MixingBuffer:
                 else: sound["index"] = end % data_len if sound["loop"] else end
                 mixed += chunk * sound["volume"]
                 if sound not in sounds_to_remove: playing_names.append(sound["name"])
-            for sound in sounds_to_remove:
+            for sound in list(sounds_to_remove):
                 if sound in self.sounds: self.sounds.remove(sound)
             np.clip(mixed, -1.0, 1.0, out=mixed)
             return mixed, playing_names
@@ -607,8 +608,10 @@ class SoundboardApp(ttk.Window):
         self.sound_card_widgets, self.ordered_sound_ids, self.selected_sound_ids, self.last_selected_id = {}, [], set(), None
         self.grid_columns = 4
 
-        self._init_tk_vars(); self._load_settings()
-        self._create_styles(); self._create_ui()
+        self._init_tk_vars()
+        self._load_settings()
+        self._create_styles()
+        self._create_ui()
         
         self.populate_device_dropdowns()
         self._apply_settings_to_ui()
@@ -658,12 +661,11 @@ class SoundboardApp(ttk.Window):
         self.toggle_mic_hotkey_var.set(get_hotkey_display_string(self.sound_manager.global_hotkeys.get("toggle_mic_to_mixer", [])))
     
     def _create_styles(self):
-        style = ttk.Style.get_instance()
-        border_color, selected_bg = style.colors.primary, style.colors.selectbg
-        style.configure('Card.TFrame', borderwidth=2, relief='solid', bordercolor=style.colors.bg)
-        style.map('Card.TFrame', bordercolor=[('selected', border_color)], background=[('selected', selected_bg)])
-        style.configure('Placeholder.TEntry', foreground=style.colors.secondary)
-        style.configure('TButton', wraplength=150, justify='center')
+        border_color, selected_bg = self.style.colors.primary, self.style.colors.selectbg
+        self.style.configure('Card.TFrame', borderwidth=2, relief='solid', bordercolor=self.style.colors.bg)
+        self.style.map('Card.TFrame', bordercolor=[('selected', border_color)], background=[('selected', selected_bg)])
+        self.style.configure('Placeholder.TEntry', foreground=self.style.colors.secondary)
+        self.style.configure('TButton', wraplength=150, justify='center')
 
     def _create_ui(self):
         notebook = ttk.Notebook(self, padding=(10, 10, 10, 0))
@@ -834,7 +836,13 @@ class SoundboardApp(ttk.Window):
         # Title
         ttk.Label(frame, text="WarpBoard", font="-size 16 -weight bold").pack(pady=5)
         ttk.Label(frame, text=f"Version: {APP_VERSION}").pack()
-        ttk.Label(frame, text="A simple, lightweight soundboard.").pack(pady=(10, 20))
+        
+        about_text = ("WarpBoard is a free, open-source soundboard built for the gaming and streaming community. "
+                      "It's designed to be simple to use, lightweight on your system, and powerful enough to bring your audio clips to life. "
+                      "Whether you're creating content, spicing up your voice chats, or just having fun, WarpBoard is here to help you make some noise.")
+        about_label = ttk.Label(frame, text=about_text, justify=LEFT, wraplength=400)
+        about_label.pack(pady=(10, 20))
+
 
         # Underlined font for links
         default_font = font.nametofont("TkDefaultFont")
@@ -849,7 +857,7 @@ class SoundboardApp(ttk.Window):
             font=link_font,
             cursor="hand2"
         )
-        profile_label.pack()
+        profile_label.pack(pady=(10,0))
         profile_label.bind("<Button-1>", lambda e: webbrowser.open(PROFILE_URL))
         ToolTip(profile_label, lambda: f"Open profile: {PROFILE_URL}")
 
@@ -879,24 +887,10 @@ class SoundboardApp(ttk.Window):
 
         # License
         ttk.Label(frame, text="License: MIT", foreground="gray").pack(pady=(10, 5))
-
-        # Keyboard shortcuts
-        shortcuts_frame = ttk.Labelframe(frame, text="Keyboard Shortcuts", padding=10)
-        shortcuts_frame.pack(fill=X, pady=(10, 5))
-
-        shortcuts = [
-            ("Ctrl + O", "Open a sound file"),
-            ("Ctrl + S", "Save board"),
-            ("Space", "Play/Pause"),
-            ("Esc", "Stop playback"),
-        ]
-        for key, action in shortcuts:
-            ttk.Label(shortcuts_frame, text=f"{key} – {action}").pack(anchor="w")
-
         # Acknowledgements
         ttk.Label(frame, text="Acknowledgements:", font="-weight bold").pack(pady=(10, 5))
-        ttk.Label(frame, text="• ttkbootstrap for UI\n• yt-dlp for audio handling\n• Community contributors").pack(anchor="w")
-
+        ttk.Label(frame, text="• ttkbootstrap for UI\n• yt-dlp for audio handling\n• Community contributors", justify=LEFT).pack(anchor="w")
+    
     def _on_frame_configure(self, event=None):
         canvas_width = self.sound_canvas.winfo_width()
         if canvas_width > 1:
