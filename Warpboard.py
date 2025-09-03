@@ -339,7 +339,6 @@ class SoundManager:
             audio.export(output_path, format="wav")
             new_sound = {"id": str(uuid.uuid4()), "name": sound_name, "path": output_path, "volume": 1.0, "hotkeys": [], "loop": False, "enabled": True, "duration": sf.info(output_path).duration}
             self.sounds.append(new_sound)
-            self.preload_sound_data(new_sound)
             self.save_config()
             return new_sound
         except Exception as e: logging.error(f"Failed to add sound {file_path}: {e}"); raise
@@ -397,7 +396,6 @@ class SoundManager:
             self.global_hotkeys = data.get("global_hotkeys", {})
             for sound in self.sounds:
                 if 'enabled' not in sound: sound['enabled'] = True
-                self.preload_sound_data(sound)
         except (json.JSONDecodeError, KeyError) as e: logging.error(f"Error loading config: {e}")
     def preload_sound_data(self, sound):
         try:
@@ -581,7 +579,8 @@ class KeybindManager:
                 if hotkey_tuple in self.hotkey_registry: self.hotkey_registry[hotkey_tuple]()
     def check_hotkeys(self):
         current_keys_tuple = tuple(sorted(self.active_keys))
-        if current_keys_tuple in self.hotkey_registry: self.hotkey_registry[current_keys_tuple]()
+        if current_keys_tuple in self.hotkey_registry:
+            self.hotkey_registry[current_keys_tuple]()
     def start(self):
         if not (self.listener and self.listener.is_alive()):
             self.listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
@@ -907,9 +906,6 @@ class SoundboardApp(ttk.Window):
 
         # License
         ttk.Label(frame, text="License: MIT", foreground="gray").pack(pady=(10, 5))
-        # Acknowledgements
-        ttk.Label(frame, text="Acknowledgements:", font="-weight bold").pack(pady=(10, 5))
-        ttk.Label(frame, text="• ttkbootstrap for UI\n• yt-dlp for audio handling\n• Community contributors", justify=LEFT).pack(anchor="w")
     
     def _on_frame_configure(self, _=None):
         canvas_width = self.sound_canvas.winfo_width()
@@ -1140,6 +1136,15 @@ class SoundboardApp(ttk.Window):
         if not sound or not sound.get("enabled", True): return
 
         audio_data = self.sound_manager.sound_data_cache.get(sound_id)
+        if audio_data is None:
+            try:
+                self.sound_manager.preload_sound_data(sound)
+                audio_data = self.sound_manager.sound_data_cache.get(sound_id)
+            except Exception as e:
+                logging.error(f"Failed to load audio on demand for '{sound['name']}': {e}")
+                self.show_status_message(f"Error playing {sound['name']}", "danger")
+                return
+
         if audio_data is not None:
             self.audio_manager.mixer.add_sound(audio_data, sound["volume"], sound["loop"], sound_id, sound["name"])
 
@@ -1147,7 +1152,8 @@ class SoundboardApp(ttk.Window):
         if self.audio_manager.mixer.remove_sound_by_id(sound_id):
             self.show_status_message(f"Stopped: {self.sound_manager.get_sound_by_id(sound_id)['name']}", "info")
     def stop_all_sounds(self):
-        self.audio_manager.mixer.clear_sounds(); self.show_status_message("All sounds stopped.", "success")
+        self.audio_manager.mixer.clear_sounds()
+        self.after(0, self.show_status_message, "All sounds stopped.", "success")
 
     def toggle_include_mic_in_mix(self):
         is_enabled = self.include_mic_in_mix_var.get()
@@ -1172,7 +1178,11 @@ class SoundboardApp(ttk.Window):
         self._save_app_settings()
         
     def toggle_mic_to_mixer_from_hotkey(self):
-        self.include_mic_in_mix_var.set(not self.include_mic_in_mix_var.get()); self.toggle_include_mic_in_mix()
+        self.after(0, self._toggle_mic_from_hotkey)
+
+    def _toggle_mic_from_hotkey(self):
+        self.include_mic_in_mix_var.set(not self.include_mic_in_mix_var.get())
+        self.toggle_include_mic_in_mix()
         
     def _assign_sound_hotkey(self, sound_id, hotkey_var):
         sound = self.sound_manager.get_sound_by_id(sound_id);
