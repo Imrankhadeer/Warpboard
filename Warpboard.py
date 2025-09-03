@@ -543,17 +543,23 @@ class AudioOutputManager:
     def _stream_callback(self, _, frame_count, __, ___):
         mixed_audio, playing_names = self.mixer.mix_audio(frame_count)
         is_mic_on = self.mic_inclusion_event.is_set()
+
         with current_playing_sound_details_lock:
             current_playing_sound_details["names"] = playing_names
             current_playing_sound_details["active"] = bool(playing_names) or is_mic_on
-        with self._soundboard_monitor_buffer_lock: self._soundboard_monitor_buffer.append(mixed_audio.copy())
+
+        # Only append to monitor buffer if monitoring is enabled
+        if self.app.soundboard_monitor_enabled_var.get():
+            with self._soundboard_monitor_buffer_lock:
+                self._soundboard_monitor_buffer.append(mixed_audio.copy())
+
         if is_mic_on:
             mixed_audio += self._get_mic_data_from_buffer(frame_count)
             np.clip(mixed_audio, -1.0, 1.0, out=mixed_audio)
-        
+
         mixed_audio *= self.master_volume
         return (mixed_audio.astype(np.float32).tobytes(), pyaudio.paContinue)
-        
+
     def _soundboard_monitor_callback(self, _, frame_count, __, ___):
         data = np.zeros((frame_count, CHANNELS), dtype=np.float32)
         with self._soundboard_monitor_buffer_lock:
