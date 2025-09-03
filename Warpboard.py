@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, Toplevel, font
+from tkinter import filedialog, messagebox, Toplevel, font
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 import json
@@ -17,7 +17,7 @@ import importlib.metadata
 from collections import deque
 from threading import Lock, Event
 from pynput import keyboard, mouse
-from typing import List
+# Removed unused import
 import enum
 import logging
 import webbrowser
@@ -105,6 +105,7 @@ class Hotkey:
         parts.append(self.raw_key if self.raw_key else self.key_code.value)
         return sorted(parts)
 
+    @classmethod
     def from_json_serializable(cls, hotkey_list: list[str]):
         modifiers, key_str = KeyModifier.NONE, None
         for s in hotkey_list:
@@ -161,14 +162,15 @@ class ToolTip(Toplevel):
         self.label = ttk.Label(self, text="", justify='left', bootstyle="inverse-light", padding=5)
         self.label.pack()
         
+        self.after_id = None
         self.widget.bind("<Enter>", self.enter)
         self.widget.bind("<Leave>", self.leave)
         self.after_id = None
 
-    def enter(self, event=None):
+    def enter(self, _=None):
         self.after_id = self.widget.after(500, self.show)
 
-    def leave(self, event=None):
+    def leave(self, _=None):
         if self.after_id:
             self.widget.after_cancel(self.after_id)
         self.hide()
@@ -222,7 +224,7 @@ class HotkeyRecorder(Toplevel):
         if key_str: self.recorded_keys.add(key_str); self._update_display()
         self._reset_timeout(); return True
 
-    def _on_mouse_click(self, x, y, button, pressed):
+    def _on_mouse_click(self, _, __, button, pressed):
         if pressed and button not in [mouse.Button.left, mouse.Button.right]:
             key_str = get_pynput_key_string(button)
             if key_str: self.recorded_keys.add(key_str); self._update_display()
@@ -456,7 +458,7 @@ class AudioOutputManager:
         try: return self.p.get_device_info_by_index(index)['name']
         except (OSError, IndexError): return "Invalid Device"
 
-    def _stream_callback(self, in_data, frame_count, time_info, status):
+    def _stream_callback(self, _, frame_count, __, ___):
         mixed_audio, playing_names = self.mixer.mix_audio(frame_count)
         is_mic_on = self.mic_inclusion_event.is_set()
         with current_playing_sound_details_lock:
@@ -470,13 +472,13 @@ class AudioOutputManager:
         mixed_audio *= self.master_volume
         return (mixed_audio.astype(np.float32).tobytes(), pyaudio.paContinue)
         
-    def _soundboard_monitor_callback(self, in_data, frame_count, time_info, status):
+    def _soundboard_monitor_callback(self, _, frame_count, __, ___):
         data = np.zeros((frame_count, CHANNELS), dtype=np.float32)
         with self._soundboard_monitor_buffer_lock:
             if self._soundboard_monitor_buffer: data = self._soundboard_monitor_buffer.popleft()
         
         return ((data * self.sb_monitor_volume).astype(np.float32).tobytes(), pyaudio.paContinue)
-    def _mic_monitor_callback(self, in_data, frame_count, time_info, status):
+    def _mic_monitor_callback(self, _, frame_count, __, ___):
         data = self._get_mic_data_from_buffer(frame_count)
         return ((data * self.mic_monitor_volume).astype(np.float32).tobytes(), pyaudio.paContinue)
 
@@ -569,7 +571,7 @@ class KeybindManager:
     def _on_release(self, key):
         key_str = get_pynput_key_string(key)
         if key_str in self.active_keys: self.active_keys.remove(key_str)
-    def _on_click(self, x, y, button, pressed):
+    def _on_click(self, _, __, button, pressed):
         if pressed and button not in [mouse.Button.left, mouse.Button.right]:
             key_str = get_pynput_key_string(button)
             if key_str:
@@ -601,6 +603,22 @@ class SoundboardApp(ttk.Window):
         self.geometry("950x700")
         center_window(self)
 
+        # --- Set custom taskbar/window icon ---
+        import sys, os
+        icon_path = os.path.join(ROOT_DIR, "icon.ico")
+        if not os.path.exists(icon_path):
+            logging.warning(f"Icon file not found: {icon_path}")
+        if getattr(sys, 'frozen', False):  # If running from PyInstaller .exe
+            icon_path = os.path.join(sys._MEIPASS, "icon.ico")
+        if os.path.exists(icon_path):
+            try:
+                self.iconbitmap(icon_path)
+            except Exception as e:
+                logging.warning(f"Could not set window icon: {e}")
+        else:
+            logging.warning(f"Icon file not found: {icon_path}")
+
+        # --- Existing initialization ---
         self.sound_manager = SoundManager()
         self.audio_manager = AudioOutputManager(self)
         self.keybind_manager = KeybindManager(self)
@@ -711,12 +729,12 @@ class SoundboardApp(ttk.Window):
         scrollbar.pack(side=RIGHT, fill=Y); self.sound_canvas.pack(side=LEFT, fill=BOTH, expand=True)
         self.canvas_window = self.sound_canvas.create_window((0, 0), window=self.sound_list_frame, anchor="nw")
         
-        self.sound_list_frame.bind("<Configure>", lambda e: self.sound_canvas.configure(scrollregion=self.sound_canvas.bbox("all")))
+        self.sound_list_frame.bind("<Configure>", lambda _: self.sound_canvas.configure(scrollregion=self.sound_canvas.bbox("all")))
         self.sound_canvas.bind("<Configure>", self._on_frame_configure)
         self.sound_canvas.bind("<Enter>", self._bind_mousewheel)
         self.sound_canvas.bind("<Leave>", self._unbind_mousewheel)
         
-        self.search_var.trace_add("write", lambda *args: self._filter_sounds())
+        self.search_var.trace_add("write", lambda *_: self._filter_sounds())
     
     def _create_settings_widgets(self, parent):
         notebook = ttk.Notebook(parent, padding=(0, 10, 0, 0)) # Add padding to top
@@ -759,14 +777,14 @@ class SoundboardApp(ttk.Window):
         label_widget = ttk.Label(parent, text=f"{int(var.get())}%", width=4)
         label_widget.grid(row=row, column=2, padx=5)
         
-        def update_volume(*args):
+        def update_volume(*_):
             volume_percent = var.get()
             label_widget.config(text=f"{int(volume_percent)}%")
             if setter_func:
                 setter_func(volume_percent / 100.0)
 
         var.trace_add("write", update_volume)
-        scale.bind("<ButtonRelease-1>", lambda e: self._save_app_settings())
+        scale.bind("<ButtonRelease-1>", lambda _: self._save_app_settings())
         parent.columnconfigure(1, weight=1)
     
     def _populate_hotkey_tab(self, parent):
@@ -858,7 +876,7 @@ class SoundboardApp(ttk.Window):
             cursor="hand2"
         )
         profile_label.pack(pady=(10,0))
-        profile_label.bind("<Button-1>", lambda e: webbrowser.open(PROFILE_URL))
+        profile_label.bind("<Button-1>", lambda _: webbrowser.open(PROFILE_URL))
         ToolTip(profile_label, lambda: f"Open profile: {PROFILE_URL}")
 
         # Website / Docs
@@ -870,7 +888,7 @@ class SoundboardApp(ttk.Window):
             cursor="hand2"
         )
         docs_label.pack()
-        docs_label.bind("<Button-1>", lambda e: webbrowser.open(DOCS_URL))
+        docs_label.bind("<Button-1>", lambda _: webbrowser.open(DOCS_URL))
         ToolTip(docs_label, lambda: f"Open documentation: {DOCS_URL}")
 
         # GitHub / Issues
@@ -882,7 +900,7 @@ class SoundboardApp(ttk.Window):
             cursor="hand2"
         )
         github_label.pack()
-        github_label.bind("<Button-1>", lambda e: webbrowser.open(ISSUES_URL))
+        github_label.bind("<Button-1>", lambda _: webbrowser.open(ISSUES_URL))
         ToolTip(github_label, lambda: f"Report bugs at: {ISSUES_URL}")
 
         # License
@@ -891,7 +909,7 @@ class SoundboardApp(ttk.Window):
         ttk.Label(frame, text="Acknowledgements:", font="-weight bold").pack(pady=(10, 5))
         ttk.Label(frame, text="• ttkbootstrap for UI\n• yt-dlp for audio handling\n• Community contributors", justify=LEFT).pack(anchor="w")
     
-    def _on_frame_configure(self, event=None):
+    def _on_frame_configure(self, _=None):
         canvas_width = self.sound_canvas.winfo_width()
         if canvas_width > 1:
             self.sound_canvas.itemconfig(self.canvas_window, width=canvas_width)
@@ -900,8 +918,8 @@ class SoundboardApp(ttk.Window):
                 self.grid_columns = new_cols
                 self._filter_sounds()
     
-    def _bind_mousewheel(self, event): self.bind_all("<MouseWheel>", self._on_mousewheel)
-    def _unbind_mousewheel(self, event): self.unbind_all("<MouseWheel>")
+    def _bind_mousewheel(self, _): self.bind_all("<MouseWheel>", self._on_mousewheel)
+    def _unbind_mousewheel(self, _): self.unbind_all("<MouseWheel>")
     def _on_mousewheel(self, event):
         try:
             widget = self.winfo_containing(event.x_root, event.y_root)
@@ -914,18 +932,18 @@ class SoundboardApp(ttk.Window):
     def _add_placeholder(self, entry, placeholder):
         entry.insert(0, placeholder)
         entry.configure(style='Placeholder.TEntry')
-        def on_focus_in(event):
+        def on_focus_in(_):
             if entry.get() == placeholder:
                 entry.delete(0, "end")
                 entry.configure(style='TEntry')
-        def on_focus_out(event):
+        def on_focus_out(_):
             if not entry.get():
                 entry.insert(0, placeholder)
                 entry.configure(style='Placeholder.TEntry')
         entry.bind("<FocusIn>", on_focus_in)
         entry.bind("<FocusOut>", on_focus_out)
 
-    def _filter_sounds(self, *args):
+    def _filter_sounds(self, *_):
         query = self.search_var.get().lower()
         if query == "search sounds...": query = ""
 
@@ -1251,7 +1269,7 @@ class SoundboardApp(ttk.Window):
         self.app_settings.save_settings({"mic_monitor_device_id": idx})
         if self.mic_monitor_enabled_var.get(): self.audio_manager.start_mic_monitor_stream()
         
-    def _on_theme_changed(self, event):
+    def _on_theme_changed(self, _):
         messagebox.showinfo("Theme Change", "Theme will be applied on next restart.", parent=self)
         self._save_app_settings()
         
