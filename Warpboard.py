@@ -350,9 +350,11 @@ class SoundManager:
         if not new_name_clean or any(s['name'] == new_name_clean for s in self.sounds if s['id'] != sound_id):
             raise ValueError("New name is invalid or already exists.")
         old_path, new_path = sound['path'], os.path.join(SOUNDS_DIR, f"{new_name_clean}.wav")
-        if os.path.exists(new_path) and old_path != new_path: raise ValueError("A file with the new name already exists.")
+        if os.path.exists(new_path) and old_path.lower() != new_path.lower():
+            raise ValueError("A file with the new name already exists.")
         try:
-            os.rename(old_path, new_path)
+            if old_path.lower() != new_path.lower():
+                os.rename(old_path, new_path)
             sound['name'], sound['path'] = new_name_clean, new_path
             self.save_config()
             return sound
