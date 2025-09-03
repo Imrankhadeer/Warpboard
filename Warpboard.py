@@ -25,12 +25,23 @@ import platform
 import subprocess
 
 # --- Configuration and Constants ---
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.path.dirname(os.path.abspath(sys.argv[0]))
-SOUNDS_DIR = os.path.join(ROOT_DIR, "sounds")
-CONFIG_DIR = os.path.join(ROOT_DIR, "config")
+def get_app_data_dir():
+    """Returns the platform-specific application data directory."""
+    if platform.system() == 'Windows':
+        return os.path.join(os.getenv('APPDATA'), 'WarpBoard')
+    elif platform.system() == 'Darwin': # macOS
+        return os.path.join(os.path.expanduser('~/Library/Application Support'), 'WarpBoard')
+    else: # Linux
+        return os.path.join(os.path.expanduser('~/.config'), 'WarpBoard')
+
+APP_DATA_DIR = get_app_data_dir()
+SOUNDS_DIR = os.path.join(APP_DATA_DIR, "sounds")
+CONFIG_DIR = os.path.join(APP_DATA_DIR, "config")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "soundboard_config.json")
 APP_SETTINGS_FILE = os.path.join(CONFIG_DIR, "app_settings.json")
-LOG_FILE = os.path.join(ROOT_DIR, "warpboard.log")
+LOG_FILE = os.path.join(APP_DATA_DIR, "warpboard.log")
+# The root directory of the script is still useful for finding bundled assets like icons.
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.path.dirname(os.path.abspath(sys.argv[0]))
 
 VB_CABLE_URL = "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack43.zip"
 PROFILE_URL = "https://github.com/Imrankhadeer"
@@ -51,13 +62,6 @@ FRAME_SIZE = 1024
 INVALID_FILENAME_CHARS = r'[<>:"/\\|?*]'
 MAX_DISPLAY_NAME_LENGTH = 30
 MAX_DEVICE_NAME_LENGTH = 45
-
-# --- Setup Logging ---
-logging.basicConfig(
-    filename=LOG_FILE,
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(module)s - %(message)s'
-)
 
 # --- Global State ---
 current_playing_sound_details = {}
@@ -119,6 +123,41 @@ class Hotkey:
 
 
 # --- Utility Functions ---
+def run_powershell_script(script_name, *args):
+    """Runs a PowerShell script from the 'scripts' directory and returns its output."""
+    try:
+        # We must use the directory of the python script itself as the base for finding the scripts folder.
+        # This makes it robust to being called from different working directories.
+        script_base_dir = os.path.dirname(os.path.abspath(__file__))
+        script_path = os.path.join(script_base_dir, 'scripts', script_name)
+        logging.info(f"Attempting to run PowerShell script from path: {script_path}")
+
+        if not os.path.exists(script_path):
+            logging.error(f"Script file not found at resolved path: {script_path}")
+            raise FileNotFoundError(f"Script not found: {script_path}")
+
+        command = ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-File', script_path] + list(args)
+        
+        result = subprocess.run(command, capture_output=True, text=True, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error running PowerShell script '{script_name}': {e.stderr}")
+        raise
+    except FileNotFoundError:
+        logging.error(f"powershell.exe not found. Please ensure it is in your system's PATH.")
+        raise
+    except Exception as e:
+        logging.error(f"An unexpected error occurred while running PowerShell script '{script_name}': {e}")
+        raise
+
+def get_executable_path(name):
+    """Gets the path to an executable, accounting for PyInstaller bundling."""
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        # Running in a PyInstaller bundle
+        return os.path.join(sys._MEIPASS, name)
+    # Running as a normal script
+    return name
+
 def get_hotkey_display_string(hotkey_list):
     if not hotkey_list: return "Not Assigned"
     try:
@@ -162,20 +201,38 @@ class ToolTip(Toplevel):
         self.label = ttk.Label(self, text="", justify='left', bootstyle="inverse-light", padding=5)
         self.label.pack()
         
-        self.after_id = None
-        self.widget.bind("<Enter>", self.enter)
-        self.widget.bind("<Leave>", self.leave)
-        self.after_id = None
+        self._scheduled_hide = None
+        self._scheduled_show = None
 
-    def enter(self, _=None):
-        self.after_id = self.widget.after(500, self.show)
+        self.widget.bind("<Enter>", self.on_enter)
+        self.widget.bind("<Leave>", self.on_leave)
+        self.label.bind("<Enter>", self.on_tooltip_enter)
+        self.label.bind("<Leave>", self.on_leave)
 
-    def leave(self, _=None):
-        if self.after_id:
-            self.widget.after_cancel(self.after_id)
-        self.hide()
+    def on_enter(self, _=None):
+        self._cancel_hide()
+        self._scheduled_show = self.after(500, self.show)
+
+    def on_leave(self, _=None):
+        self._cancel_show()
+        self._scheduled_hide = self.after(100, self.hide)
+    
+    def on_tooltip_enter(self, _=None):
+        self._cancel_hide()
+
+    def _cancel_show(self):
+        if self._scheduled_show:
+            self.after_cancel(self._scheduled_show)
+            self._scheduled_show = None
+
+    def _cancel_hide(self):
+        if self._scheduled_hide:
+            self.after_cancel(self._scheduled_hide)
+            self._scheduled_hide = None
 
     def show(self):
+        if self.state() == 'normal':
+            return
         self.label.config(text=self.text_func())
         x = self.widget.winfo_rootx()
         y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
@@ -258,11 +315,14 @@ class DependencyChecker:
     def run_checks():
         try:
             importlib.metadata.version("pydub")
+            ffmpeg_path = get_executable_path('ffmpeg.exe')
             creation_flags = subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
-            subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True, creationflags=creation_flags)
+            subprocess.run([ffmpeg_path, '-version'], capture_output=True, check=True, creationflags=creation_flags)
         except (Exception) as e:
-            logging.critical(f"Dependency check failed: {e}")
-            messagebox.showerror("Dependency Error", "Required libraries (like pydub) or FFmpeg are missing.")
+            logging.critical(f"Dependency check failed for ffmpeg: {e}")
+            # This check runs before the main app window is created, so we can't parent the messagebox.
+            # It will appear centered on the screen, which is acceptable for a startup-critical error.
+            messagebox.showerror("Dependency Error", "FFmpeg is missing or not configured correctly. Please ensure ffmpeg.exe is in the application directory.")
             sys.exit(1)
 
 class AppSettingsManager:
@@ -286,7 +346,13 @@ class MixingBuffer:
         with self.lock: self.single_sound_mode = enabled
     def add_sound(self, data, volume, loop, sound_id, sound_name):
         with self.lock:
-            if self.single_sound_mode: self.sounds.clear()
+            if self.single_sound_mode:
+                self.sounds.clear()
+            elif not loop:
+                # If the sound is not set to loop, remove any existing instances of it before adding a new one.
+                # This effectively restarts the sound if it's played again.
+                self.sounds = deque(s for s in self.sounds if s["id"] != sound_id)
+
             self.sounds.append({"id": sound_id, "data": data, "volume": volume, "loop": loop, "index": 0, "name": sound_name})
     def mix_audio(self, frames):
         with self.lock:
@@ -339,7 +405,6 @@ class SoundManager:
             audio.export(output_path, format="wav")
             new_sound = {"id": str(uuid.uuid4()), "name": sound_name, "path": output_path, "volume": 1.0, "hotkeys": [], "loop": False, "enabled": True, "duration": sf.info(output_path).duration}
             self.sounds.append(new_sound)
-            self.preload_sound_data(new_sound)
             self.save_config()
             return new_sound
         except Exception as e: logging.error(f"Failed to add sound {file_path}: {e}"); raise
@@ -350,9 +415,11 @@ class SoundManager:
         if not new_name_clean or any(s['name'] == new_name_clean for s in self.sounds if s['id'] != sound_id):
             raise ValueError("New name is invalid or already exists.")
         old_path, new_path = sound['path'], os.path.join(SOUNDS_DIR, f"{new_name_clean}.wav")
-        if os.path.exists(new_path) and old_path != new_path: raise ValueError("A file with the new name already exists.")
+        if os.path.exists(new_path) and old_path.lower() != new_path.lower():
+            raise ValueError("A file with the new name already exists.")
         try:
-            os.rename(old_path, new_path)
+            if old_path.lower() != new_path.lower():
+                os.rename(old_path, new_path)
             sound['name'], sound['path'] = new_name_clean, new_path
             self.save_config()
             return sound
@@ -395,7 +462,6 @@ class SoundManager:
             self.global_hotkeys = data.get("global_hotkeys", {})
             for sound in self.sounds:
                 if 'enabled' not in sound: sound['enabled'] = True
-                self.preload_sound_data(sound)
         except (json.JSONDecodeError, KeyError) as e: logging.error(f"Error loading config: {e}")
     def preload_sound_data(self, sound):
         try:
@@ -425,27 +491,43 @@ class AudioOutputManager:
     def set_mic_monitor_volume(self, volume): self.mic_monitor_volume = volume
 
     def _enumerate_devices(self):
-        output, input_devs = [], []
-        for i in range(self.p.get_device_count()):
-            dev = self.p.get_device_info_by_index(i)
-            try:
-                if dev.get('maxOutputChannels', 0) >= CHANNELS:
-                    if self.p.is_format_supported(SAMPLE_RATE,
-                                                  output_device=i,
-                                                  output_channels=CHANNELS,
-                                                  output_format=pyaudio.paFloat32):
-                        output.append({"name": dev['name'], "index": i})
+            output, input_devs = [], []
+            seen_output_names = set()
+            seen_input_names = set()
+            
+            # A more robust list of substrings to filter out
+            FILTERED_SUBSTRINGS = ['microsoft sound mapper', 'primary sound']
 
-                if dev.get('maxInputChannels', 0) >= CHANNELS:
-                    if self.p.is_format_supported(SAMPLE_RATE,
-                                                 input_device=i,
-                                                 input_channels=CHANNELS,
-                                                 input_format=pyaudio.paFloat32):
-                        input_devs.append({"name": dev['name'], "index": i})
-            except ValueError:
-                logging.warning(f"Device check failed for {dev.get('name')}. It may not be a standard audio device. Skipping.")
-                continue
-        return output, input_devs
+            for i in range(self.p.get_device_count()):
+                dev = self.p.get_device_info_by_index(i)
+                device_name = dev['name']
+
+                # Skip devices if their name contains any of the filtered substrings
+                if any(sub in device_name.lower() for sub in FILTERED_SUBSTRINGS):
+                    continue
+
+                try:
+                    if dev.get('maxOutputChannels', 0) >= CHANNELS:
+                        if device_name not in seen_output_names:
+                            if self.p.is_format_supported(SAMPLE_RATE,
+                                                        output_device=i,
+                                                        output_channels=CHANNELS,
+                                                        output_format=pyaudio.paFloat32):
+                                output.append({"name": device_name, "index": i})
+                                seen_output_names.add(device_name)
+
+                    if dev.get('maxInputChannels', 0) >= CHANNELS:
+                        if device_name not in seen_input_names:
+                            if self.p.is_format_supported(SAMPLE_RATE,
+                                                        input_device=i,
+                                                        input_channels=CHANNELS,
+                                                        input_format=pyaudio.paFloat32):
+                                input_devs.append({"name": device_name, "index": i})
+                                seen_input_names.add(device_name)
+                except ValueError:
+                    logging.warning(f"Device check failed for {dev.get('name')}. It may not be a standard audio device. Skipping.")
+                    continue
+            return output, input_devs
         
     def _find_virtual_mic(self):
         for dev in self.output_devices:
@@ -579,7 +661,8 @@ class KeybindManager:
                 if hotkey_tuple in self.hotkey_registry: self.hotkey_registry[hotkey_tuple]()
     def check_hotkeys(self):
         current_keys_tuple = tuple(sorted(self.active_keys))
-        if current_keys_tuple in self.hotkey_registry: self.hotkey_registry[current_keys_tuple]()
+        if current_keys_tuple in self.hotkey_registry:
+            self.hotkey_registry[current_keys_tuple]()
     def start(self):
         if not (self.listener and self.listener.is_alive()):
             self.listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
@@ -598,6 +681,7 @@ class SoundboardApp(ttk.Window):
     """The main application class for the soundboard."""
     def __init__(self):
         self.app_settings = AppSettingsManager()
+        self._set_initial_devices_if_needed()
         themename = self.app_settings.get_setting("theme", "vapor")
         super().__init__(title="WarpBoard", themename=themename, minsize=(700, 500))
         self.geometry("950x700")
@@ -624,6 +708,7 @@ class SoundboardApp(ttk.Window):
         self.keybind_manager = KeybindManager(self)
         
         self.sound_card_widgets, self.ordered_sound_ids, self.selected_sound_ids, self.last_selected_id = {}, [], set(), None
+        self.unfiltered_output_devices, self.unfiltered_input_devices, self.filtered_input_devices, self.filtered_monitor_devices = [], [], [], []
         self.grid_columns = 4
 
         self._init_tk_vars()
@@ -634,6 +719,8 @@ class SoundboardApp(ttk.Window):
         self.populate_device_dropdowns()
         self._apply_settings_to_ui()
         self.populate_sound_list()
+
+        self.after(100, self._first_run_check) # Defer to allow main window to draw
         
         self.keybind_manager.update_hotkeys()
         self.audio_manager.start_main_stream()
@@ -671,7 +758,7 @@ class SoundboardApp(ttk.Window):
 
     def _load_settings(self):
         self.current_theme_var.set(self.style.theme.name)
-        settings_defaults = {"auto_start_mic": False, "soundboard_monitor_enabled": False, "mic_monitor_enabled": False, "master_volume": 100.0, "soundboard_monitor_volume": 75.0, "mic_monitor_volume": 75.0, "single_sound_mode": False}
+        settings_defaults = {"auto_start_mic": False, "soundboard_monitor_enabled": True, "mic_monitor_enabled": False, "master_volume": 100.0, "soundboard_monitor_volume": 75.0, "mic_monitor_volume": 75.0, "single_sound_mode": True}
         for key, default in settings_defaults.items():
             if hasattr(self, f"{key}_var"): getattr(self, f"{key}_var").set(self.app_settings.get_setting(key, default))
         self.include_mic_in_mix_var.set(self.auto_start_mic_var.get())
@@ -739,27 +826,37 @@ class SoundboardApp(ttk.Window):
     def _create_settings_widgets(self, parent):
         notebook = ttk.Notebook(parent, padding=(0, 10, 0, 0)) # Add padding to top
         notebook.pack(fill=BOTH, expand=True)
-        audio_tab, hotkey_tab, general_tab, setup_tab, about_tab = ttk.Frame(notebook), ttk.Frame(notebook), ttk.Frame(notebook), ttk.Frame(notebook), ttk.Frame(notebook)
-        notebook.add(audio_tab, text="Audio"); notebook.add(hotkey_tab, text="Hotkeys"); notebook.add(general_tab, text="General"); notebook.add(setup_tab, text="Setup Guide"); notebook.add(about_tab, text="About")
-        self._populate_audio_tab(audio_tab); self._populate_hotkey_tab(hotkey_tab); self._populate_general_tab(general_tab); self._populate_setup_guide_tab(setup_tab); self._populate_about_tab(about_tab)
+        audio_tab, hotkey_tab, general_tab, audio_setup_tab, about_tab = ttk.Frame(notebook), ttk.Frame(notebook), ttk.Frame(notebook), ttk.Frame(notebook), ttk.Frame(notebook)
+        notebook.add(audio_tab, text="Audio"); notebook.add(hotkey_tab, text="Hotkeys"); notebook.add(general_tab, text="General"); notebook.add(audio_setup_tab, text="Audio Setup"); notebook.add(about_tab, text="About")
+        self._populate_audio_tab(audio_tab); self._populate_hotkey_tab(hotkey_tab); self._populate_general_tab(general_tab); self._populate_audio_setup_tab(audio_setup_tab); self._populate_about_tab(about_tab)
     
     def _populate_audio_tab(self, parent):
         device_frame = ttk.Labelframe(parent, text="Audio Devices", padding=10)
         device_frame.pack(fill=X, pady=10, padx=10)
         self.output_device_combo = self._create_device_combo(device_frame, "App Output", 0, self._on_output_device_selected, "The virtual audio device that other apps (like Discord, OBS) will listen to. Select your VB-CABLE here.")
+        app_output_note = ttk.Label(device_frame, text='(Shows as “CABLE Input (VB-Audio Virtual Cable)” in other apps)', bootstyle="secondary", font="-size 8")
+        app_output_note.grid(row=0, column=2, sticky=W, padx=5)
         self.input_device_combo = self._create_device_combo(device_frame, "Your Microphone", 1, self._on_input_device_selected, "Select your physical microphone here.")
-        self.sb_monitor_combo = self._create_device_combo(device_frame, "Listen to Sounds", 2, self._on_sb_monitor_device_selected, "To hear the soundboard through your headphones/speakers, select them here and check 'Enable' below.")
-        self.mic_monitor_combo = self._create_device_combo(device_frame, "Listen to Mic", 3, self._on_mic_monitor_device_selected, "To hear your own microphone (sidetone), select your headphones/speakers here and check 'Enable' below.")
+        self.sb_monitor_combo = self._create_device_combo(device_frame, "Listen to Soundboard", 2, self._on_sb_monitor_device_selected, "To hear the soundboard through your headphones/speakers, select them here and check 'Enable' below.")
+        self.mic_monitor_combo = self._create_device_combo(device_frame, "Hear Your Voice", 3, self._on_mic_monitor_device_selected, "To hear your own microphone (sidetone), select your headphones/speakers here and check 'Enable' below.")
         
         vol_frame = ttk.Labelframe(parent, text="Volume & Monitoring", padding=10)
         vol_frame.pack(fill=X, pady=10, padx=10)
         self._create_volume_slider(vol_frame, "Master Output", 0, self.master_volume_var, self.audio_manager.set_master_volume)
-        self._create_volume_slider(vol_frame, "Sounds Monitor", 1, self.soundboard_monitor_volume_var, self.audio_manager.set_sb_monitor_volume)
-        self._create_volume_slider(vol_frame, "Mic Monitor", 2, self.mic_monitor_volume_var, self.audio_manager.set_mic_monitor_volume)
+        self._create_volume_slider(vol_frame, "Soundboard Monitor", 1, self.soundboard_monitor_volume_var, self.audio_manager.set_sb_monitor_volume)
+        self._create_volume_slider(vol_frame, "Voice Monitor", 2, self.mic_monitor_volume_var, self.audio_manager.set_mic_monitor_volume)
         ttk.Separator(vol_frame).grid(row=3, column=0, columnspan=3, sticky=EW, pady=10)
-        ttk.Checkbutton(vol_frame, text="Enable 'Listen to Sounds'", variable=self.soundboard_monitor_enabled_var, command=self.toggle_soundboard_monitor, bootstyle="round-toggle").grid(row=4, column=0, columnspan=3, sticky=W)
-        ttk.Checkbutton(vol_frame, text="Enable 'Listen to Mic'", variable=self.mic_monitor_enabled_var, command=self.toggle_mic_monitor, bootstyle="round-toggle").grid(row=5, column=0, columnspan=3, sticky=W, pady=(5,0))
-        ttk.Checkbutton(vol_frame, text="Include Mic in App Output", variable=self.include_mic_in_mix_var, command=self.toggle_include_mic_in_mix, bootstyle="round-toggle").grid(row=6, column=0, columnspan=3, sticky=W, pady=(5,0))
+        sb_monitor_check = ttk.Checkbutton(vol_frame, text="Enable 'Listen to Soundboard'", variable=self.soundboard_monitor_enabled_var, command=self.toggle_soundboard_monitor, bootstyle="round-toggle")
+        sb_monitor_check.grid(row=4, column=0, columnspan=3, sticky=W)
+        ToolTip(sb_monitor_check, lambda: "Hear the soundboard audio through your selected 'Listen to Soundboard' device.")
+
+        mic_monitor_check = ttk.Checkbutton(vol_frame, text="Enable 'Hear Your Voice'", variable=self.mic_monitor_enabled_var, command=self.toggle_mic_monitor, bootstyle="round-toggle")
+        mic_monitor_check.grid(row=5, column=0, columnspan=3, sticky=W, pady=(5,0))
+        ToolTip(mic_monitor_check, lambda: "Hear your own microphone (sidetone) through your selected 'Hear Your Voice' device.")
+
+        include_mic_check = ttk.Checkbutton(vol_frame, text="Include Mic in App Output", variable=self.include_mic_in_mix_var, command=self.toggle_include_mic_in_mix, bootstyle="round-toggle")
+        include_mic_check.grid(row=6, column=0, columnspan=3, sticky=W, pady=(5,0))
+        ToolTip(include_mic_check, lambda: "Mix your actual microphone into the main 'App Output' so others can hear you and the sounds.")
 
     def _create_device_combo(self, parent, label, row, command, tooltip_text):
         label_widget = ttk.Label(parent, text=label)
@@ -807,36 +904,184 @@ class SoundboardApp(ttk.Window):
         theme_combo = ttk.Combobox(frame, textvariable=self.current_theme_var, values=self.style.theme_names(), state="readonly")
         theme_combo.grid(row=0, column=1, sticky=EW, padx=5)
         theme_combo.bind("<<ComboboxSelected>>", self._on_theme_changed)
-        ttk.Checkbutton(frame, text="Single Sound Mode (stop others on play)", variable=self.single_sound_mode_var, command=self._on_single_sound_mode_changed, bootstyle="round-toggle").grid(row=1, column=0, columnspan=2, sticky=W, pady=5)
-        ttk.Checkbutton(frame, text="Automatically include Mic on startup", variable=self.auto_start_mic_var, command=lambda: self._save_app_settings(), bootstyle="round-toggle").grid(row=2, column=0, columnspan=2, sticky=W)
+        single_sound_check = ttk.Checkbutton(frame, text="Single Sound Mode (stop others on play)", variable=self.single_sound_mode_var, command=self._on_single_sound_mode_changed, bootstyle="round-toggle")
+        single_sound_check.grid(row=1, column=0, columnspan=2, sticky=W, pady=5)
+        ToolTip(single_sound_check, lambda: "When enabled, playing a new sound will automatically stop any sound that is already playing.")
+
+        auto_start_mic_check = ttk.Checkbutton(frame, text="Automatically include Mic on startup", variable=self.auto_start_mic_var, command=lambda: self._save_app_settings(), bootstyle="round-toggle")
+        auto_start_mic_check.grid(row=2, column=0, columnspan=2, sticky=W)
+        ToolTip(auto_start_mic_check, lambda: "If checked, your microphone will automatically be included in the 'App Output' every time you start WarpBoard.")
         frame.columnconfigure(1, weight=1)
 
-    def _populate_setup_guide_tab(self, parent):
-        guide_frame = ttk.Labelframe(parent, text="VB-CABLE Setup", padding=15)
-        guide_frame.pack(fill=X, padx=10, pady=10)
-        
-        instructions = (
-            "WarpBoard requires a free 'virtual audio cable' to send audio to other applications (like Discord, OBS, or games).\n\n"
-            "1. Download VB-CABLE from the official site.\n"
-            "2. Extract the .zip file to a folder.\n"
-            "3. Right-click 'VBCABLE_Setup_x64.exe' and select 'Run as administrator'.\n"
-            "4. Click 'Install Driver' and reboot your PC when prompted.\n"
-            "5. In WarpBoard's 'Audio' settings, select 'CABLE Input' as the 'App Output'."
-        )
-        label = ttk.Label(guide_frame, text=instructions, justify=LEFT)
-        label.pack(anchor=W, pady=5, fill=X)
-        label.winfo_toplevel().update_idletasks() # Ensure wraplength is calculated correctly
-        label.configure(wraplength=guide_frame.winfo_width() - 30)
+    def _populate_audio_setup_tab(self, parent):
+        setup_frame = ttk.Labelframe(parent, text="VB-CABLE Virtual Mic Setup", padding=15)
+        setup_frame.pack(fill=X, padx=10, pady=10)
 
-        ttk.Button(guide_frame, text="Download VB-CABLE", command=lambda: webbrowser.open(VB_CABLE_URL), bootstyle="primary").pack(pady=10)
+        instructions = (
+            "WarpBoard uses a free 'virtual audio cable' to send audio to other applications (like Discord, OBS, or games). "
+            "If it's not installed, the app can install it for you on first launch.\n\n"
+            "If you have issues, you can use the tools below to manage the audio driver."
+        )
+        label = ttk.Label(setup_frame, text=instructions, justify=LEFT)
+        label.pack(anchor=W, pady=5, fill=X)
+        label.winfo_toplevel().update_idletasks()
+        label.configure(wraplength=setup_frame.winfo_width() - 30)
+
+        ttk.Button(setup_frame, text="Download VB-CABLE manually", command=lambda: webbrowser.open(VB_CABLE_URL)).pack(pady=10)
+
+        actions_frame = ttk.Labelframe(parent, text="Maintenance Actions", padding=15)
+        actions_frame.pack(fill=X, padx=10, pady=10)
         
-        troubleshoot_frame = ttk.Labelframe(parent, text="Troubleshooting", padding=15)
-        troubleshoot_frame.pack(fill=X, padx=10, pady=10)
-        ttk.Label(troubleshoot_frame, text="If you encounter issues, the log file can help identify the problem.").pack(anchor=W, pady=5)
-        ttk.Button(troubleshoot_frame, text="Open Log File", command=self._open_log_file, bootstyle="info-outline").pack(pady=10)
+        ttk.Button(actions_frame, text="Fix Audio Setup", command=self._fix_audio_setup).pack(side=LEFT, padx=5)
+        ttk.Button(actions_frame, text="Fix Duplicate Devices", command=self._fix_duplicate_devices).pack(side=LEFT, padx=5)
+        
+        reinstall_btn = ttk.Button(actions_frame, text="⚠️ Force Reinstall VB-Cable", command=self._force_reinstall_vb_cable, bootstyle="danger")
+        reinstall_btn.pack(side=LEFT, padx=5)
+
+        log_frame = ttk.Labelframe(parent, text="Troubleshooting", padding=15)
+        log_frame.pack(fill=X, padx=10, pady=10)
+        ttk.Label(log_frame, text="If you encounter issues, the log file can help identify the problem.").pack(anchor=W, pady=5)
+        ttk.Button(log_frame, text="Open Log File", command=self._open_log_file, bootstyle="info-outline").pack(pady=10)
+
+    def _first_run_check(self, force_install=False):
+        """Checks if VB-CABLE is installed on first run and initiates installation if not."""
+        is_installed = any(VIRTUAL_MIC_NAME_PARTIAL.lower() in dev['name'].lower() for dev in self.audio_manager.output_devices)
+        
+        # Run if forced OR if it's the first run and the device isn't found.
+        if force_install or (not is_installed and not self.app_settings.get_setting("vb_cable_installed", False)):
+            if not messagebox.askyesno("VB-CABLE Driver Required", 
+                                     "WarpBoard requires the free VB-CABLE virtual audio driver to function. May we install it for you now? \n\n(Your default audio devices will be temporarily changed and then restored.)", 
+                                     parent=self):
+                return
+
+            popup = Toplevel(self)
+            popup.title("Installing...")
+            ttk.Label(popup, text="Installing WarpBoard Virtual Mic…\nThis may take a few seconds.\nYour regular headphones and mic will remain unchanged.", padding=20).pack()
+            self.center_toplevel(popup)
+            self.update_idletasks()
+
+            try:
+                # 1. Get current default devices
+                logging.info("Getting current default audio devices.")
+                defaults_json = run_powershell_script('get_default_devices.ps1')
+                defaults = json.loads(defaults_json)
+                logging.info(f"Saved defaults: {defaults}")
+
+                # 2. Run VB-CABLE installer silently
+                # IMPORTANT: This requires the user to bundle VBCABLE_Setup_x64.exe and know its silent flags.
+                # The silent flag for VB-Cable's installer is /S (case-sensitive).
+                logging.info("Running VB-CABLE installer...")
+                # We assume the installer is bundled with the app. This path needs to be confirmed by the user.
+                installer_path = os.path.join(ROOT_DIR, 'VBCABLE_Setup_x64.exe')
+                if not os.path.exists(installer_path):
+                    raise FileNotFoundError("VB-CABLE installer not found in application directory.")
+                
+                # Using start /wait to ensure the installer finishes before we proceed.
+                subprocess.run(f'start /wait "" "{installer_path}" /S', shell=True, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                logging.info("VB-CABLE installer finished.")
+                
+                # Give the system a moment to recognize the new device
+                time.sleep(5)
+
+                # 3. Restore default devices
+                logging.info("Restoring default audio devices.")
+                run_powershell_script('set_default_devices.ps1',
+                                      f"-DefaultPlayback \"{defaults['DefaultPlayback']}\"",
+                                      f"-DefaultCommunicationsPlayback \"{defaults['DefaultCommunicationsPlayback']}\"",
+                                      f"-DefaultRecording \"{defaults['DefaultRecording']}\"",
+                                      f"-DefaultCommunicationsRecording \"{defaults['DefaultCommunicationsRecording']}\"")
+                logging.info("Default devices restored.")
+
+                self.app_settings.save_settings({"vb_cable_installed": True})
+                messagebox.showinfo("Installation Complete", "VB-CABLE has been installed successfully! Please restart WarpBoard for the changes to take full effect.", parent=self)
+
+            except Exception as e:
+                logging.error(f"VB-CABLE automatic installation failed: {e}")
+                messagebox.showerror("Installation Failed", f"An error occurred during the automatic installation of VB-CABLE. You may need to install it manually.\n\nError: {e}", parent=self)
+            finally:
+                popup.destroy()
+                # Refresh device list after installation attempt
+                self.audio_manager.output_devices, self.audio_manager.input_devices = self.audio_manager._enumerate_devices()
+                self.populate_device_dropdowns()
+
+    def _fix_audio_setup(self):
+        """Runs a script to restore the user's original default audio devices."""
+        try:
+            defaults = self.app_settings.get_setting("original_system_defaults")
+            if not defaults:
+                messagebox.showwarning("Not Found", "Original default device settings not found. Cannot restore.", parent=self)
+                return
+
+            messagebox.showinfo("Fixing Audio", "Attempting to restore your original default audio devices...", parent=self)
+            logging.info("Running 'Fix Audio Setup' to restore original devices.")
+            run_powershell_script('set_default_devices.ps1',
+                                  f"-DefaultPlayback \"{defaults['DefaultPlaybackId']}\"",
+                                  f"-DefaultCommunicationsPlayback \"{defaults['DefaultCommunicationsPlaybackId']}\"",
+                                  f"-DefaultRecording \"{defaults['DefaultRecordingId']}\"",
+                                  f"-DefaultCommunicationsRecording \"{defaults['DefaultCommunicationsRecordingId']}\"")
+            messagebox.showinfo("Complete", "Default audio devices have been restored.", parent=self)
+        except Exception as e:
+            logging.error(f"Failed to run 'Fix Audio Setup' script: {e}")
+            messagebox.showerror("Error", f"Failed to run fix script: {e}", parent=self)
+
+    def _force_reinstall_vb_cable(self):
+        """Forces a re-installation of the VB-CABLE driver."""
+        # This is essentially the installation part of the first run check, without the conditions.
+        if messagebox.askyesno("Confirm Re-installation", 
+                               "This will attempt to force a re-installation of the VB-CABLE driver. This can be useful if the driver is corrupted. Are you sure you want to continue?", 
+                               parent=self):
+            # We pass a flag to the first_run_check to force it to run the installation part.
+            self._first_run_check(force_install=True)
+
+    def _fix_duplicate_devices(self):
+        """Runs the script to remove duplicate audio devices."""
+        try:
+            messagebox.showinfo("Fixing Duplicates", "Searching for and disabling duplicate audio devices. This may take a moment.", parent=self)
+            logging.info("Running duplicate device cleanup script...")
+            output = run_powershell_script('remove_duplicate_devices.ps1')
+            logging.info(f"Cleanup script output: {output}")
+            messagebox.showinfo("Complete", "Duplicate device cleanup finished. It's recommended to restart the application.", parent=self)
+            # Refresh device list after cleanup
+            self.audio_manager.output_devices, self.audio_manager.input_devices = self.audio_manager._enumerate_devices()
+            self.populate_device_dropdowns()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to run cleanup script: {e}", parent=self)
+
+    def _set_initial_devices_if_needed(self):
+        """If no devices are saved in settings, detect and save system defaults."""
+        if self.app_settings.get_setting("input_device_id") is None:
+            logging.info("First run or settings reset: detecting system default audio devices.")
+            try:
+                defaults_json = run_powershell_script('get_default_devices.ps1')
+                defaults = json.loads(defaults_json)
+                
+                # We prioritize the 'Communications' device for both mic and speaker monitoring,
+                # as this is the most common use case for communication apps.
+                default_mic_id = defaults.get("DefaultCommunicationsRecordingId") or defaults.get("DefaultRecordingId")
+                default_speaker_id = defaults.get("DefaultCommunicationsPlaybackId") or defaults.get("DefaultPlaybackId")
+
+                # Save the detected defaults for the app to use
+                if default_mic_id:
+                    self.app_settings.save_settings({"input_device_id": default_mic_id})
+                if default_speaker_id:
+                    self.app_settings.save_settings({
+                        "soundboard_monitor_device_id": default_speaker_id,
+                        "mic_monitor_device_id": default_speaker_id
+                    })
+                
+                # Also save the original defaults object for the 'Fix Audio' button
+                self.app_settings.save_settings({"original_system_defaults": defaults})
+                logging.info(f"Saved system defaults: {defaults}")
+            except Exception as e:
+                logging.error(f"Failed to get system default devices on first run: {e}")
+                # Don't show a popup, as this may run before the main window is ready.
+                # The user can select devices manually.
 
     def _open_log_file(self):
         try:
+            if not os.path.exists(LOG_FILE):
+                messagebox.showinfo("Info", "Log file has not been created yet.", parent=self)
+                return
             if platform.system() == "Windows":
                 os.startfile(LOG_FILE)
             elif platform.system() == "Darwin": # macOS
@@ -905,9 +1150,6 @@ class SoundboardApp(ttk.Window):
 
         # License
         ttk.Label(frame, text="License: MIT", foreground="gray").pack(pady=(10, 5))
-        # Acknowledgements
-        ttk.Label(frame, text="Acknowledgements:", font="-weight bold").pack(pady=(10, 5))
-        ttk.Label(frame, text="• ttkbootstrap for UI\n• yt-dlp for audio handling\n• Community contributors", justify=LEFT).pack(anchor="w")
     
     def _on_frame_configure(self, _=None):
         canvas_width = self.sound_canvas.winfo_width()
@@ -1138,6 +1380,15 @@ class SoundboardApp(ttk.Window):
         if not sound or not sound.get("enabled", True): return
 
         audio_data = self.sound_manager.sound_data_cache.get(sound_id)
+        if audio_data is None:
+            try:
+                self.sound_manager.preload_sound_data(sound)
+                audio_data = self.sound_manager.sound_data_cache.get(sound_id)
+            except Exception as e:
+                logging.error(f"Failed to load audio on demand for '{sound['name']}': {e}")
+                self.show_status_message(f"Error playing {sound['name']}", "danger")
+                return
+
         if audio_data is not None:
             self.audio_manager.mixer.add_sound(audio_data, sound["volume"], sound["loop"], sound_id, sound["name"])
 
@@ -1145,7 +1396,8 @@ class SoundboardApp(ttk.Window):
         if self.audio_manager.mixer.remove_sound_by_id(sound_id):
             self.show_status_message(f"Stopped: {self.sound_manager.get_sound_by_id(sound_id)['name']}", "info")
     def stop_all_sounds(self):
-        self.audio_manager.mixer.clear_sounds(); self.show_status_message("All sounds stopped.", "success")
+        self.audio_manager.mixer.clear_sounds()
+        self.after(0, self.show_status_message, "All sounds stopped.", "success")
 
     def toggle_include_mic_in_mix(self):
         is_enabled = self.include_mic_in_mix_var.get()
@@ -1170,8 +1422,8 @@ class SoundboardApp(ttk.Window):
         self._save_app_settings()
         
     def toggle_mic_to_mixer_from_hotkey(self):
-        self.include_mic_in_mix_var.set(not self.include_mic_in_mix_var.get()); self.toggle_include_mic_in_mix()
-        
+        self.after(0, self._toggle_mic_from_hotkey)
+
     def _assign_sound_hotkey(self, sound_id, hotkey_var):
         sound = self.sound_manager.get_sound_by_id(sound_id);
         if not sound: return
@@ -1232,41 +1484,75 @@ class SoundboardApp(ttk.Window):
         logging.info("--- WarpBoard Closed ---")
         
     def populate_device_dropdowns(self):
-        output_names = [dev['name'] for dev in self.audio_manager.output_devices]
-        input_names = [dev['name'] for dev in self.audio_manager.input_devices]
-        for combo, names in [(self.output_device_combo, output_names), (self.input_device_combo, input_names), (self.sb_monitor_combo, output_names), (self.mic_monitor_combo, output_names)]:
-            combo['values'] = names
-        self._set_combo_from_setting(self.output_device_combo, "output_device_id", self.audio_manager.virtual_mic_device_id)
-        self._set_combo_from_setting(self.input_device_combo, "input_device_id")
-        self._set_combo_from_setting(self.sb_monitor_combo, "soundboard_monitor_device_id")
-        self._set_combo_from_setting(self.mic_monitor_combo, "mic_monitor_device_id")
-        
-    def _set_combo_from_setting(self, combo, setting_key, default_id=None):
-        device_id = self.app_settings.get_setting(setting_key, default_id)
+            # Keep the full, unfiltered lists from the audio manager
+            self.unfiltered_output_devices = self.audio_manager.output_devices
+            self.unfiltered_input_devices = self.audio_manager.input_devices
+            
+            # --- App Output Dropdown ---
+            output_display_names = []
+            for dev in self.unfiltered_output_devices:
+                # Determine the name that will be displayed in the UI
+                display_name = "🎙 WarpBoard Virtual Mic" if VIRTUAL_MIC_NAME_PARTIAL.lower() in dev['name'].lower() else dev['name']
+                
+                # Only add the name if it's not already in our list to prevent duplicates
+                if display_name not in output_display_names:
+                    output_display_names.append(display_name)
+            
+            self.output_device_combo['values'] = output_display_names
+            
+            # --- Other Dropdowns (with filtering) ---
+            is_virtual_device = lambda name: VIRTUAL_MIC_NAME_PARTIAL.lower() in name.lower() or 'vb-audio' in name.lower()
+            self.filtered_input_devices = [dev for dev in self.unfiltered_input_devices if not is_virtual_device(dev['name'])]
+            self.filtered_monitor_devices = [dev for dev in self.unfiltered_output_devices if not is_virtual_device(dev['name'])]
+
+            self.input_device_combo['values'] = [dev['name'] for dev in self.filtered_input_devices]
+            self.sb_monitor_combo['values'] = [dev['name'] for dev in self.filtered_monitor_devices]
+            self.mic_monitor_combo['values'] = [dev['name'] for dev in self.filtered_monitor_devices]
+
+            # Set selections from saved settings
+            self._set_combo_from_setting(self.output_device_combo, "output_device_id", self.unfiltered_output_devices, "🎙 WarpBoard Virtual Mic")
+            self._set_combo_from_setting(self.input_device_combo, "input_device_id", self.filtered_input_devices)
+            self._set_combo_from_setting(self.sb_monitor_combo, "soundboard_monitor_device_id", self.filtered_monitor_devices)
+            self._set_combo_from_setting(self.mic_monitor_combo, "mic_monitor_device_id", self.filtered_monitor_devices)
+            
+    def _set_combo_from_setting(self, combo, setting_key, device_list, preferred_device_name=None):
+        device_id = self.app_settings.get_setting(setting_key)
+        if device_id is None:
+            if combo['values']:
+                # combo.current(0) # Don't auto-select, wait for user
+                pass
+            return
+
         try:
             device_name = self.audio_manager.get_device_name_by_index(device_id)
-            if device_name in combo['values']: combo.set(device_name)
-            elif combo['values']: combo.current(0)
-        except Exception:
-            if combo['values']: combo.current(0)
-            
+            if device_name in combo['values']:
+                combo.set(device_name)
+        except Exception as e:
+            logging.warning(f"Failed to set device for {setting_key} from saved ID {device_id}: {e}")
+
     def _on_output_device_selected(self, event):
-        idx = self.audio_manager.output_devices[event.widget.current()]['index']
-        self.app_settings.save_settings({"output_device_id": idx}); self.audio_manager.start_main_stream()
-        
+        selected_index_in_list = event.widget.current()
+        # The display names list directly corresponds to the unfiltered list
+        device_id = self.unfiltered_output_devices[selected_index_in_list]['index']
+        self.app_settings.save_settings({"output_device_id": device_id})
+        self.audio_manager.start_main_stream()
+
     def _on_input_device_selected(self, event):
-        idx = self.audio_manager.input_devices[event.widget.current()]['index']
-        self.app_settings.save_settings({"input_device_id": idx})
+        selected_index_in_list = event.widget.current()
+        device_id = self.filtered_input_devices[selected_index_in_list]['index']
+        self.app_settings.save_settings({"input_device_id": device_id})
         if self.include_mic_in_mix_var.get(): self.audio_manager.start_mic_input()
-        
+
     def _on_sb_monitor_device_selected(self, event):
-        idx = self.audio_manager.output_devices[event.widget.current()]['index']
-        self.app_settings.save_settings({"soundboard_monitor_device_id": idx})
+        selected_index_in_list = event.widget.current()
+        device_id = self.filtered_monitor_devices[selected_index_in_list]['index']
+        self.app_settings.save_settings({"soundboard_monitor_device_id": device_id})
         if self.soundboard_monitor_enabled_var.get(): self.audio_manager.start_soundboard_monitor_stream()
-        
+
     def _on_mic_monitor_device_selected(self, event):
-        idx = self.audio_manager.output_devices[event.widget.current()]['index']
-        self.app_settings.save_settings({"mic_monitor_device_id": idx})
+        selected_index_in_list = event.widget.current()
+        device_id = self.filtered_monitor_devices[selected_index_in_list]['index']
+        self.app_settings.save_settings({"mic_monitor_device_id": device_id})
         if self.mic_monitor_enabled_var.get(): self.audio_manager.start_mic_monitor_stream()
         
     def _on_theme_changed(self, _):
@@ -1289,11 +1575,25 @@ class SoundboardApp(ttk.Window):
         self.toggle_mic_monitor()
 
 def ensure_folders():
-    for folder in [SOUNDS_DIR, CONFIG_DIR]:
+    """Creates the necessary application data folders if they don't exist."""
+    for folder in [APP_DATA_DIR, SOUNDS_DIR, CONFIG_DIR]:
         os.makedirs(folder, exist_ok=True)
 
 if __name__ == "__main__":
+    # Point pydub to the bundled ffmpeg/ffprobe when running from .exe
+    if getattr(sys, 'frozen', False):
+        pydub.AudioSegment.ffmpeg = get_executable_path('ffmpeg.exe')
+        pydub.AudioSegment.ffprobe = get_executable_path('ffprobe.exe')
+
     ensure_folders()
+    
+    # --- Setup Logging ---
+    logging.basicConfig(
+        filename=LOG_FILE,
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(module)s - %(message)s'
+    )
+
     DependencyChecker.run_checks()
     app = SoundboardApp()
     app.mainloop()

@@ -2,3 +2,4 @@ sounds/
 config/
 *.log
 node_modules/
+*.ico
