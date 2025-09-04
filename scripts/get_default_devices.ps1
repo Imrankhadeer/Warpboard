@@ -3,8 +3,8 @@
 
 try {
     # Construct the path to the local module and import it.
-    $PSScriptRoot = Split-Path -Parent -Path $MyInvocation.MyCommand.Definition
-    $ModulePath = Join-Path $PSScriptRoot "modules/AudioDeviceCmdlets"
+    $ScriptRoot = Split-Path -Parent -Path $MyInvocation.MyCommand.Definition
+    $ModulePath = Join-Path $ScriptRoot "modules/AudioDeviceCmdlets"
     Import-Module -Name $ModulePath -Force
 }
 catch {
