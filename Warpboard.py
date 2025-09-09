@@ -23,6 +23,8 @@ import logging
 import webbrowser
 import platform
 import subprocess
+from PIL import Image
+import pystray
 
 # --- Configuration and Constants ---
 def get_app_data_dir():
@@ -728,7 +730,11 @@ class SoundboardApp(ttk.Window):
         self.audio_manager.start_main_stream()
 
         self.update_now_playing_status()
-        self.protocol("WM_DELETE_WINDOW", self._on_app_closure)
+        self.tray_icon = None
+        self.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
+
+        self._create_and_run_tray_icon()
+
         self.update_idletasks()
         self._on_frame_configure()
 
@@ -1350,7 +1356,7 @@ class SoundboardApp(ttk.Window):
                 audio_data = self.sound_manager.sound_data_cache.get(sound_id)
             except Exception as e:
                 logging.error(f"Failed to load audio on demand for '{sound['name']}': {e}")
-                self.show_status_message(f"Error playing {sound['name']}", "danger")
+                self.after(0, self.show_status_message, f"Error playing {sound['name']}", "danger")
                 return
 
         if audio_data is not None:
@@ -1442,9 +1448,83 @@ class SoundboardApp(ttk.Window):
         settings = {"theme": self.current_theme_var.get(), "master_volume": self.master_volume_var.get(), "soundboard_monitor_volume": self.soundboard_monitor_volume_var.get(), "mic_monitor_volume": self.mic_monitor_volume_var.get(), "soundboard_monitor_enabled": self.soundboard_monitor_enabled_var.get(), "mic_monitor_enabled": self.mic_monitor_enabled_var.get(), "auto_start_mic": self.auto_start_mic_var.get(), "single_sound_mode": self.single_sound_mode_var.get()}
         self.app_settings.save_settings(settings); logging.info("Application settings saved.")
         
+    def _hide_to_tray(self):
+        self.withdraw()
+        if self.tray_icon:
+            self.tray_icon.visible = True
+
+    def _show_from_tray(self):
+        if self.tray_icon:
+            self.tray_icon.visible = False
+        self.after(0, self._perform_show_from_tray)
+
+    def _perform_show_from_tray(self):
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
+    def _quit_from_tray(self):
+        if self.tray_icon:
+            self.tray_icon.stop()
+        self._on_app_closure()
+
+    def _on_tray_toggle_sb_monitor(self):
+        self.after(0, self._perform_tray_toggle_sb_monitor)
+
+    def _perform_tray_toggle_sb_monitor(self):
+        var = self.soundboard_monitor_enabled_var
+        var.set(not var.get())
+        self.toggle_soundboard_monitor()
+
+    def _on_tray_toggle_mic_mix(self):
+        self.after(0, self._perform_tray_toggle_mic_mix)
+
+    def _perform_tray_toggle_mic_mix(self):
+        var = self.include_mic_in_mix_var
+        var.set(not var.get())
+        self.toggle_include_mic_in_mix()
+
+    def _create_and_run_tray_icon(self):
+        icon_path = os.path.join(ROOT_DIR, "icon.ico")
+        if os.path.exists(icon_path):
+            image = Image.open(icon_path)
+            menu = pystray.Menu(
+                pystray.MenuItem('Open', self._show_from_tray, default=True),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem(
+                    'Listen to Board',
+                    self._on_tray_toggle_sb_monitor,
+                    checked=lambda item: self.soundboard_monitor_enabled_var.get()
+                ),
+                pystray.MenuItem(
+                    'Include Mic',
+                    self._on_tray_toggle_mic_mix,
+                    checked=lambda item: self.include_mic_in_mix_var.get()
+                ),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem('Quit', self._quit_from_tray)
+            )
+            self.tray_icon = pystray.Icon("WarpBoard", image, "WarpBoard", menu)
+
+            def setup(icon):
+                icon.visible = False
+
+            self.tray_thread = threading.Thread(
+                target=self.tray_icon.run,
+                args=(setup,),
+                daemon=True)
+            self.tray_thread.start()
+        else:
+            logging.warning("icon.ico not found, can't create tray icon.")
+
     def _on_app_closure(self):
-        self._save_app_settings(); self.sound_manager.save_config()
-        self.audio_manager.close(); self.keybind_manager.stop(); self.destroy()
+        if self.tray_icon:
+            self.tray_icon.stop()
+        self._save_app_settings()
+        self.sound_manager.save_config()
+        self.audio_manager.close()
+        self.keybind_manager.stop()
+        self.destroy()
         logging.info("--- WarpBoard Closed ---")
         
     def populate_device_dropdowns(self):
